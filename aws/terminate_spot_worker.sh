@@ -67,6 +67,44 @@ terminate_and_cleanup() {
         --query "Reservations[].Instances[].PublicIpAddress" \
         --output text 2>/dev/null || true)
 
+    # Deregister workers from Deadline before terminating
+    echo "==> Deregistering workers from Deadline..."
+    for IID in $IDS; do
+        # Check SSM agent is online first
+        SSM_STATUS=$(aws ssm describe-instance-information \
+            --filters "Key=InstanceIds,Values=$IID" \
+            --region "$REGION" \
+            --query 'InstanceInformationList[0].PingStatus' \
+            --output text 2>/dev/null || echo "Offline")
+
+        if [[ "$SSM_STATUS" == "Online" ]]; then
+            # shellcheck disable=SC2016  # $PATH is intentional — sent to remote instance
+            DEREG_CMD=$(echo 'export PATH="/opt/hfs21.0/bin:/opt/Thinkbox/Deadline10/bin:$PATH"; deadlinecommand -removeWorker 2>&1' | base64 -w0)
+            CMD_ID=$(aws ssm send-command \
+                --instance-ids "$IID" \
+                --document-name "AWS-RunShellScript" \
+                --parameters "commands=[\"echo $DEREG_CMD | base64 -d | bash\"]" \
+                --timeout-seconds 30 \
+                --region "$REGION" \
+                --query 'Command.CommandId' --output text 2>/dev/null || true)
+
+            if [[ -n "$CMD_ID" ]]; then
+                sleep 8
+                aws ssm get-command-invocation \
+                    --command-id "$CMD_ID" \
+                    --instance-id "$IID" \
+                    --region "$REGION" \
+                    --query 'StandardOutputContent' --output text 2>/dev/null | head -3
+                echo "    Worker $IID deregistered from Deadline"
+            else
+                echo "    WARNING: Could not send deregister command to $IID"
+            fi
+        else
+            echo "    WARNING: SSM Offline for $IID — skipping Deadline deregistration"
+        fi
+    done
+
+    echo ""
     echo "==> Terminating instances: $IDS"
     # shellcheck disable=SC2086
     aws ec2 terminate-instances \
