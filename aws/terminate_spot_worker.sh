@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# aws/terminate_spot_worker.sh — Terminate spot worker(s) launched by this project
+# aws/terminate_spot_worker.sh — Terminate spot worker(s) and clean up ZeroTier
 # Preconditions: instances exist and were tagged with project=deadline-worker
 set -euo pipefail
 
 REGION="us-west-2"
 TAG_PROJECT="deadline-worker"
+ZT_NETWORK="d3ecf5726d14ac76"
+ZT_TOKEN="${ZEROTIER_API_TOKEN:-}"
 
 # ── Parse args ────────────────────────────────────────────────────────────────
 if [[ $# -eq 0 ]]; then
@@ -14,6 +16,66 @@ if [[ $# -eq 0 ]]; then
     echo "  $0 i-abc123 [i-def456] Terminate specific instance(s)"
     exit 0
 fi
+
+# ── Helper: find ZeroTier node IDs associated with instances ──────────────────
+# Each instance's ZeroTier node ID is stored in the log or can be found by
+# matching the instance's public IP against ZeroTier member physicalAddress.
+zt_cleanup_for_instance() {
+    local INSTANCE_IP="$1"
+
+    if [[ -z "$ZT_TOKEN" || -z "$INSTANCE_IP" ]]; then
+        return
+    fi
+
+    # Find ZeroTier members whose physicalAddress matches this instance IP
+    MEMBERS=$(curl -sf -H "Authorization: token $ZT_TOKEN" \
+        "https://my.zerotier.com/api/v1/network/$ZT_NETWORK/member" 2>/dev/null || echo "[]")
+
+    # Match by physical IP (ZeroTier stores the last-known public IP)
+    NODE_IDS=$(echo "$MEMBERS" | jq -r \
+        ".[] | select(.physicalAddress | startswith(\"$INSTANCE_IP\")) | .nodeId" 2>/dev/null || true)
+
+    for NODE_ID in $NODE_IDS; do
+        echo "    ZeroTier: deauthorizing and deleting node $NODE_ID (IP: $INSTANCE_IP)"
+
+        # Deauthorize first, then delete
+        curl -sf -X DELETE \
+            -H "Authorization: token $ZT_TOKEN" \
+            "https://my.zerotier.com/api/v1/network/$ZT_NETWORK/member/$NODE_ID" \
+            >/dev/null 2>&1 || true
+
+        echo "    OK: node $NODE_ID removed from network"
+    done
+}
+
+# ── Helper: terminate instances and clean up ZeroTier ─────────────────────────
+terminate_and_cleanup() {
+    local IDS="$1"
+
+    # Get instance IPs before terminating (for ZeroTier cleanup)
+    # shellcheck disable=SC2086
+    INSTANCE_IPS=$(aws ec2 describe-instances \
+        --instance-ids $IDS \
+        --region "$REGION" \
+        --query "Reservations[].Instances[].PublicIpAddress" \
+        --output text 2>/dev/null || true)
+
+    echo "==> Terminating instances: $IDS"
+    # shellcheck disable=SC2086
+    aws ec2 terminate-instances \
+        --instance-ids $IDS \
+        --region "$REGION" \
+        --output table
+
+    # Clean up ZeroTier nodes
+    if [[ -n "$INSTANCE_IPS" && "$INSTANCE_IPS" != "None" ]]; then
+        echo ""
+        echo "==> ZeroTier cleanup:"
+        for IP in $INSTANCE_IPS; do
+            zt_cleanup_for_instance "$IP"
+        done
+    fi
+}
 
 # ── List mode ─────────────────────────────────────────────────────────────────
 if [[ "${1:-}" == "--list" ]]; then
@@ -47,18 +109,12 @@ if [[ "${1:-}" == "--all" ]]; then
         exit 0
     fi
 
-    echo "==> Terminating all workers: $IDS"
     # shellcheck disable=SC2086
-    aws ec2 terminate-instances \
-        --instance-ids $IDS \
-        --region "$REGION" \
-        --output table
+    terminate_and_cleanup "$IDS"
     exit 0
 fi
 
 # ── Terminate specific instances ──────────────────────────────────────────────
-echo "==> Terminating: $*"
-aws ec2 terminate-instances \
-    --instance-ids "$@" \
-    --region "$REGION" \
-    --output table
+IDS="$*"
+# shellcheck disable=SC2086
+terminate_and_cleanup "$IDS"
