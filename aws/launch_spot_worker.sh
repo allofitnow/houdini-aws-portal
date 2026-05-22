@@ -158,7 +158,168 @@ else
     echo "    Authorize manually: https://my.zerotier.com/network/$ZT_NETWORK"
 fi
 
+# ── Verify worker readiness ──────────────────────────────────────────────────
 echo ""
-echo "==> DONE. Next:"
-echo "    - Worker should appear in Deadline Monitor within 3-5 min"
-echo "    - To terminate: ./aws/terminate_spot_worker.sh $INSTANCE_IDS"
+echo "==> Verifying worker readiness..."
+
+for IID in $INSTANCE_IDS; do
+    echo ""
+    echo "--- Worker $IID ---"
+    PASS=0
+    CHECKS=4
+
+    # Check 1: ZeroTier member is online with an IP
+    ZT_STATUS="FAIL"
+    if [[ -n "$ZT_TOKEN" ]]; then
+        # Get instance public IP to match against ZeroTier physicalAddress
+        INSTANCE_IP=$(aws ec2 describe-instances \
+            --instance-ids "$IID" \
+            --region "$REGION" \
+            --query "Reservations[0].Instances[0].PublicIpAddress" \
+            --output text 2>/dev/null || echo "")
+
+        if [[ -n "$INSTANCE_IP" && "$INSTANCE_IP" != "None" ]]; then
+            ZT_MEMBER=$(curl -sf -H "Authorization: token $ZT_TOKEN" \
+                "https://my.zerotier.com/api/v1/network/$ZT_NETWORK/member" 2>/dev/null || echo "[]")
+
+            # Find member matching this instance's public IP
+            ZT_NODE=$(echo "$ZT_MEMBER" | jq -r \
+                ".[] | select(.physicalAddress | startswith(\"$INSTANCE_IP\")) | .nodeId" 2>/dev/null | head -1 || true)
+
+            if [[ -n "$ZT_NODE" ]]; then
+                ZT_IP=$(echo "$ZT_MEMBER" | jq -r \
+                    ".[] | select(.nodeId==\"$ZT_NODE\") | .config.ipAssignments[0] // \"\"" 2>/dev/null || true)
+
+                if [[ -n "$ZT_IP" ]]; then
+                    ZT_STATUS="OK (node=$ZT_NODE ip=$ZT_IP)"
+                    PASS=$((PASS + 1))
+                else
+                    ZT_STATUS="WAIT (node=$ZT_NODE online but no IP yet)"
+                fi
+            else
+                ZT_STATUS="WAIT (no ZeroTier member matching IP $INSTANCE_IP)"
+            fi
+        else
+            ZT_STATUS="SKIP (no public IP)"
+        fi
+    else
+        ZT_STATUS="SKIP (no ZEROTIER_API_TOKEN)"
+    fi
+    echo "    [1/$CHECKS] ZeroTier:    $ZT_STATUS"
+
+    # Check 2: SSM agent is online (instance must be managed)
+    SSM_STATUS="FAIL"
+    SSM_PING=$(aws ssm describe-instance-information \
+        --filters "Key=InstanceIds,Values=$IID" \
+        --region "$REGION" \
+        --query "InstanceInformationList[0].PingStatus" \
+        --output text 2>/dev/null || echo "Offline")
+
+    if [[ "$SSM_PING" == "Online" ]]; then
+        SSM_STATUS="OK"
+        PASS=$((PASS + 1))
+    else
+        SSM_STATUS="WAIT (PingStatus=$SSM_PING)"
+    fi
+    echo "    [2/$CHECKS] SSM Agent:   $SSM_STATUS"
+
+    # Check 3: deadline10launcher service is active
+    SVC_STATUS="FAIL"
+    if [[ "$SSM_PING" == "Online" ]]; then
+        SVC_CMD=$(aws ssm send-command \
+            --instance-ids "$IID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters commands=["systemctl is-active deadline10launcher 2>/dev/null || echo inactive"] \
+            --timeout-seconds 30 \
+            --region "$REGION" \
+            --query "Command.CommandId" \
+            --output text 2>/dev/null || echo "")
+
+        if [[ -n "$SVC_CMD" ]]; then
+            # Wait for command to complete
+            sleep 5
+            SVC_RESULT=$(aws ssm get-command-invocation \
+                --command-id "$SVC_CMD" \
+                --instance-id "$IID" \
+                --region "$REGION" \
+                --query "Status" \
+                --output text 2>/dev/null || echo "Failed")
+
+            if [[ "$SVC_RESULT" == "Success" ]]; then
+                SVC_OUT=$(aws ssm get-command-invocation \
+                    --command-id "$SVC_CMD" \
+                    --instance-id "$IID" \
+                    --region "$REGION" \
+                    --query "StandardOutputContent" \
+                    --output text 2>/dev/null || echo "")
+
+                if echo "$SVC_OUT" | grep -q "active"; then
+                    SVC_STATUS="OK (active)"
+                    PASS=$((PASS + 1))
+                else
+                    SVC_STATUS="WAIT (service: ${SVC_OUT:-unknown})"
+                fi
+            else
+                SVC_STATUS="WAIT (SSM command: $SVC_RESULT)"
+            fi
+        else
+            SVC_STATUS="FAIL (could not send SSM command)"
+        fi
+    else
+        SVC_STATUS="SKIP (SSM not online)"
+    fi
+    echo "    [3/$CHECKS] Deadline svc: $SVC_STATUS"
+
+    # Check 4: Deadline log shows successful repository connection
+    LOG_STATUS="FAIL"
+    if [[ "$SSM_PING" == "Online" ]]; then
+        LOG_CMD=$(aws ssm send-command \
+            --instance-ids "$IID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters commands=["tail -20 /var/log/deadline10launcher.log 2>/dev/null || journalctl -u deadline10launcher --no-pager -n 20 2>/dev/null || echo no-log"] \
+            --timeout-seconds 30 \
+            --region "$REGION" \
+            --query "Command.CommandId" \
+            --output text 2>/dev/null || echo "")
+
+        if [[ -n "$LOG_CMD" ]]; then
+            sleep 5
+            LOG_RESULT=$(aws ssm get-command-invocation \
+                --command-id "$LOG_CMD" \
+                --instance-id "$IID" \
+                --region "$REGION" \
+                --query "Status" \
+                --output text 2>/dev/null || echo "Failed")
+
+            if [[ "$LOG_RESULT" == "Success" ]]; then
+                LOG_OUT=$(aws ssm get-command-invocation \
+                    --command-id "$LOG_CMD" \
+                    --instance-id "$IID" \
+                    --region "$REGION" \
+                    --query "StandardOutputContent" \
+                    --output text 2>/dev/null || echo "")
+
+                if echo "$LOG_OUT" | grep -qi "connected\|registered\|ready\|slave started\|worker started"; then
+                    LOG_STATUS="OK (connected to repo)"
+                    PASS=$((PASS + 1))
+                elif echo "$LOG_OUT" | grep -qi "error\|fail\|refused\|timeout"; then
+                    LOG_STATUS="WARN (errors in log)"
+                else
+                    LOG_STATUS="WAIT (log not yet showing connection)"
+                fi
+            else
+                LOG_STATUS="WAIT (SSM command: $LOG_RESULT)"
+            fi
+        fi
+    else
+        LOG_STATUS="SKIP (SSM not online)"
+    fi
+    echo "    [4/$CHECKS] Deadline log: $LOG_STATUS"
+
+    # Summary
+    echo "    Result: $PASS/$CHECKS checks passed"
+done
+
+echo ""
+echo "==> DONE."
+echo "    - To terminate: source .env && ./aws/terminate_spot_worker.sh $INSTANCE_IDS"
