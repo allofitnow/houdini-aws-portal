@@ -3,13 +3,24 @@
 # Preconditions: .env sourced, AMI available, ZeroTier network active
 set -euo pipefail
 
+# ── AWS CLI path ─────────────────────────────────────────────────────────────
+# uv-installed AWS CLI may not be on PATH; prefer it if found
+AWS_CLI="/home/aoin/.cache/uv/archive-v0/FXuFsIxiijforE87cox8l/bin/aws"
+if [[ -x "$AWS_CLI" ]]; then
+    PATH="/home/aoin/.cache/uv/archive-v0/FXuFsIxiijforE87cox8l/bin:$PATH"
+fi
+
 # ── Defaults ──────────────────────────────────────────────────────────────────
 AMI_ID="ami-0f70342f66dc80ddb"
 INSTANCE_TYPE="g6e.4xlarge"
 REGION="us-west-2"
+# On-demand for initial test; switch to spot once capacity is available
+MARKET_TYPE="${MARKET_TYPE:-on-demand}"
 IAM_PROFILE="deadline-worker-profile"
 SG_ID="${SG_ID:-sg-0f7755ef50058d7a1}"
-SUBNET_ID="${SUBNET_ID:-subnet-58e53520}"
+SUBNET_ID="${SUBNET_ID:-}"
+# Spot launches are AZ-flexible by default — ignore SUBNET_ID from environment
+SUBNET_ID=""
 KEY_NAME="deadline-ami-build"
 TAG_PROJECT="deadline-worker"
 ZT_NETWORK="d3ecf5726d14ac76"
@@ -33,9 +44,8 @@ if [[ "$AMI_STATE" != "available" ]]; then
     exit 1
 fi
 
-echo "==> Launching $COUNT x $INSTANCE_TYPE spot worker(s)"
+echo "==> Launching $COUNT x $INSTANCE_TYPE ($MARKET_TYPE) worker(s)"
 echo "    AMI:      $AMI_ID"
-echo "    Subnet:   $SUBNET_ID"
 echo "    SG:       $SG_ID"
 echo "    Profile:  $IAM_PROFILE"
 echo ""
@@ -53,23 +63,84 @@ PRICE_CAP=$(aws ec2 describe-spot-price-history \
 CAP=$(echo "$PRICE_CAP" | awk '{ cap = $1 * 1.5; if (cap > 2.0) cap = 2.0; printf "%.3f", cap }')
 echo "    Spot cap: \$$CAP/hr"
 
-# ── Launch ────────────────────────────────────────────────────────────────────
-TIMESTAMP=$(date +%s)
+# ── Discover VPC subnets (AZ-flexible for spot) ──────────────────────────────
+# If SUBNET_ID is set, use it directly. Otherwise discover all public subnets
+# in the VPC so we can retry across AZs on InsufficientInstanceCapacity.
+VPC_ID="${VPC_ID:-vpc-23b1f65b}"
+SUBNETS=()
+if [[ -n "$SUBNET_ID" ]]; then
+    SUBNETS=("$SUBNET_ID")
+else
+    # Discover all public subnets in VPC for AZ-flexible spot launching
+    while IFS= read -r sid; do
+        [[ -n "$sid" ]] && SUBNETS+=("$sid")
+    done < <(aws ec2 describe-subnets \
+        --filters "Name=vpc-id,Values=$VPC_ID" \
+                   "Name=map-public-ip-on-launch,Values=true" \
+        --region "$REGION" \
+        --query "Subnets[].SubnetId" \
+        --output text 2>/dev/null | tr '\t' '\n')
+fi
 
-LAUNCH_RESULT=$(aws ec2 run-instances \
-    --image-id "$AMI_ID" \
-    --instance-type "$INSTANCE_TYPE" \
-    --instance-market-options "MarketType=spot,SpotOptions={MaxPrice=$CAP,SpotInstanceType=one-time}" \
-    --iam-instance-profile "Name=$IAM_PROFILE" \
-    --security-group-ids "$SG_ID" \
-    --subnet-id "$SUBNET_ID" \
-    --key-name "$KEY_NAME" \
-    --count "$COUNT" \
-    --tag-specifications \
-        "ResourceType=instance,Tags=[{Key=project,Value=$TAG_PROJECT},{Key=Name,Value=deadline-worker-$TIMESTAMP}]" \
-        "ResourceType=spot-instances-request,Tags=[{Key=project,Value=$TAG_PROJECT}]" \
-    --region "$REGION" \
-    --output json)
+if (( ${#SUBNETS[@]} == 0 )); then
+    echo "ERROR: No public subnets found in VPC $VPC_ID"
+    exit 1
+fi
+
+echo "    Subnets:  ${SUBNETS[*]} (${#SUBNETS[@]} AZs)"
+
+# ── Launch (retry across AZs on capacity errors) ─────────────────────────────
+TIMESTAMP=$(date +%s)
+LAUNCH_RESULT=""
+LAUNCHED=false
+
+for SUBNET in "${SUBNETS[@]}"; do
+    echo ""
+    echo "==> Trying subnet $SUBNET..."
+
+    # Build market options based on MARKET_TYPE
+    MARKET_OPTS=()
+    if [[ "$MARKET_TYPE" == "spot" ]]; then
+        MARKET_OPTS=(--instance-market-options "MarketType=spot,SpotOptions={MaxPrice=$CAP,SpotInstanceType=one-time}")
+    fi
+
+    LAUNCH_RESULT=$(aws ec2 run-instances \
+        --image-id "$AMI_ID" \
+        --instance-type "$INSTANCE_TYPE" \
+        "${MARKET_OPTS[@]}" \
+        --iam-instance-profile "Name=$IAM_PROFILE" \
+        --security-group-ids "$SG_ID" \
+        --subnet-id "$SUBNET" \
+        --key-name "$KEY_NAME" \
+        --count "$COUNT" \
+        --tag-specifications \
+            "ResourceType=instance,Tags=[{Key=project,Value=$TAG_PROJECT},{Key=Name,Value=deadline-worker-$TIMESTAMP},{Key=market,Value=$MARKET_TYPE}]" \
+            "ResourceType=spot-instances-request,Tags=[{Key=project,Value=$TAG_PROJECT}]" \
+        --region "$REGION" \
+        --output json 2>&1) && LAUNCHED=true
+
+    if $LAUNCHED; then
+        break
+    fi
+
+    # Check if it's a capacity error — try next AZ
+    if echo "$LAUNCH_RESULT" | grep -q "InsufficientInstanceCapacity"; then
+        AZ=$(aws ec2 describe-subnets --subnet-ids "$SUBNET" --region "$REGION" \
+            --query "Subnets[0].AvailabilityZone" --output text 2>/dev/null || echo "unknown")
+        echo "    No capacity in $AZ, trying next AZ..."
+        continue
+    fi
+
+    # Some other error — stop
+    echo "ERROR: Launch failed"
+    echo "$LAUNCH_RESULT"
+    exit 1
+done
+
+if ! $LAUNCHED; then
+    echo "ERROR: InsufficientInstanceCapacity in all ${#SUBNETS[@]} AZs"
+    exit 1
+fi
 
 INSTANCE_IDS=$(echo "$LAUNCH_RESULT" | jq -r '.Instances[].InstanceId' 2>/dev/null || true)
 

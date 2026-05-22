@@ -3,6 +3,13 @@
 # Preconditions: instances exist and were tagged with project=deadline-worker
 set -euo pipefail
 
+# ── AWS CLI path ─────────────────────────────────────────────────────────────
+# uv-installed AWS CLI may not be on PATH; prefer it if found
+AWS_CLI="/home/aoin/.cache/uv/archive-v0/FXuFsIxiijforE87cox8l/bin/aws"
+if [[ -x "$AWS_CLI" ]]; then
+    PATH="/home/aoin/.cache/uv/archive-v0/FXuFsIxiijforE87cox8l/bin:$PATH"
+fi
+
 REGION="us-west-2"
 TAG_PROJECT="deadline-worker"
 ZT_NETWORK="d3ecf5726d14ac76"
