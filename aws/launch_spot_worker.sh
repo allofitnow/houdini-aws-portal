@@ -98,10 +98,12 @@ for SUBNET in "${SUBNETS[@]}"; do
     echo ""
     echo "==> Trying subnet $SUBNET..."
 
-    # Build market options based on MARKET_TYPE
+    # Build market options and tag specs based on MARKET_TYPE
     MARKET_OPTS=()
+    TAG_SPECS=("ResourceType=instance,Tags=[{Key=project,Value=$TAG_PROJECT},{Key=Name,Value=deadline-worker-$TIMESTAMP},{Key=market,Value=$MARKET_TYPE}]")
     if [[ "$MARKET_TYPE" == "spot" ]]; then
         MARKET_OPTS=(--instance-market-options "MarketType=spot,SpotOptions={MaxPrice=$CAP,SpotInstanceType=one-time}")
+        TAG_SPECS+=("ResourceType=spot-instances-request,Tags=[{Key=project,Value=$TAG_PROJECT}]")
     fi
 
     LAUNCH_RESULT=$(aws ec2 run-instances \
@@ -113,9 +115,7 @@ for SUBNET in "${SUBNETS[@]}"; do
         --subnet-id "$SUBNET" \
         --key-name "$KEY_NAME" \
         --count "$COUNT" \
-        --tag-specifications \
-            "ResourceType=instance,Tags=[{Key=project,Value=$TAG_PROJECT},{Key=Name,Value=deadline-worker-$TIMESTAMP},{Key=market,Value=$MARKET_TYPE}]" \
-            "ResourceType=spot-instances-request,Tags=[{Key=project,Value=$TAG_PROJECT}]" \
+        --tag-specifications "${TAG_SPECS[@]}" \
         --region "$REGION" \
         --output json 2>&1) && LAUNCHED=true
 
