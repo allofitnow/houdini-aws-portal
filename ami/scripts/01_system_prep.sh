@@ -5,8 +5,9 @@
 
 LOG=/var/log/ami-build.log
 exec >> "$LOG" 2>&1
+set -euo pipefail
 
-echo "==> [01] System prep started at $(date)"
+echo "==>"
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -15,7 +16,7 @@ apt-get upgrade -y
 apt-get install -y \
     build-essential \
     dkms \
-    linux-headers-$(uname -r) \
+    "linux-headers-$(uname -r)" \
     curl \
     wget \
     unzip \

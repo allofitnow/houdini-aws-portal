@@ -14,6 +14,8 @@
 #   sudo bash build.sh --repo-ip 10.147.20.5 --s3-bucket renderfarm-installers \
 #                      --houdini-build 506 --b2-bucket renders-allofitnow
 
+set -euo pipefail
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts"
 LOG=/var/log/ami-build.log
 

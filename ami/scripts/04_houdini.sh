@@ -25,8 +25,9 @@ AWS_REGION="${AWS_REGION:-us-west-2}"
 
 LOG=/var/log/ami-build.log
 exec >> "$LOG" 2>&1
+set -euo pipefail
 
-echo "==> [04] Houdini ${HOUDINI_VERSION} install started at $(date)"
+echo "==>"
 
 TARBALL="houdini-${HOUDINI_VERSION}.${HOUDINI_BUILD}-linux_x86_64_gcc11.2.tar.gz"
 TMP_DIR=$(mktemp -d)
@@ -55,6 +56,8 @@ echo "source ${INSTALL_DIR}/houdini_setup" > /etc/profile.d/houdini.sh
 chmod +x /etc/profile.d/houdini.sh
 
 # Verify headless render binary
+# houdini_setup may not exist during dry-run review — non-fatal
+# shellcheck source=/dev/null
 source "${INSTALL_DIR}/houdini_setup" 2>/dev/null || true
 hython --version || {
     echo "ERROR: hython not found after Houdini install"

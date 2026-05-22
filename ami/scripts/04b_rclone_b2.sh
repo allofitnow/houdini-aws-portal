@@ -20,8 +20,9 @@ AWS_REGION="${AWS_REGION:-us-west-2}"
 
 LOG=/var/log/ami-build.log
 exec >> "$LOG" 2>&1
+set -euo pipefail
 
-echo "==> [04b] rclone B2 setup started at $(date)"
+echo "==>"
 
 # Install rclone
 curl -fsSL https://rclone.org/install.sh | bash

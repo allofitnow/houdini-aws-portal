@@ -19,8 +19,9 @@ INSTALLER="DeadlineClient-${DEADLINE_VERSION}-linux-x64-installer.run"
 
 LOG=/var/log/ami-build.log
 exec >> "$LOG" 2>&1
+set -euo pipefail
 
-echo "==> [05] Deadline Worker ${DEADLINE_VERSION} install started at $(date)"
+echo "==>"
 
 TMP_DIR=$(mktemp -d)
 
@@ -45,6 +46,7 @@ chmod +x "${TMP_DIR}/${INSTALLER}"
     --groups "${DEADLINE_GROUP}"
 
 # Do not start the worker now — it will start on first boot once ZT is authorized
+# May fail on fresh install if unit not yet loaded — non-fatal
 systemctl disable deadline10launcher.service 2>/dev/null || true
 
 # Write a boot-order aware override: start Deadline only after ZT is up and UBL is ready
