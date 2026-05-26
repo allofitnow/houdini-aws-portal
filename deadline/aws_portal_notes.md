@@ -1,6 +1,54 @@
 # Configuring Deadline AWS Portal
 
-## Prerequisites
+## Status — AWS Portal Plugin (Deadline 10.4.2.3)
+
+The legacy Thinkbox AWS Portal plugin is **not bundled** with Deadline 10.4.2.3
+(maintenance mode since 2025-11-07). Plugin installation is tracked in GitLab
+issue #35 (deferred). Until the plugin is available, use the CLI workaround
+scripts described below.
+
+## CLI Workaround: Manual Spot Worker Management
+
+Use these scripts (in `aws/`) to launch and terminate workers manually while
+awaiting the AWS Portal plugin.
+
+### Launch workers
+
+```bash
+source .env
+
+# Launch one worker (default)
+./aws/launch_spot_worker.sh
+
+# Launch three workers
+./aws/launch_spot_worker.sh 3
+```
+
+After launch, authorize each new ZeroTier node at:
+https://my.zerotier.com/network/d3ecf5726d14ac76
+
+Workers appear in Deadline Monitor (pool `houdini-aws-gpu`) within ~3-5 minutes
+of ZeroTier authorization.
+
+### Manage running workers
+
+```bash
+# List all running workers
+./aws/terminate_spot_worker.sh --list
+
+# Terminate a specific instance
+./aws/terminate_spot_worker.sh i-0abc123def456
+
+# Terminate all project workers
+./aws/terminate_spot_worker.sh --all
+```
+
+Workers **are not** auto-terminated without the Portal plugin. Monitor idle
+instances and terminate them to control cost.
+
+---
+
+## Prerequisites (for Portal plugin path)
 - AMI has been built and `create_ami.sh` completed successfully
 - Quota increase for G/VT Spot in us-west-2 is approved (160 vCPUs)
 - Deadline Monitor 10.4.2.3 open on Windows workstation
@@ -19,14 +67,14 @@ Required policies:
 
 1. Open **Tools → Configure AWS Portal**
 2. **Region:** `us-west-2`
-3. **AMI ID:** *(paste the AMI ID output by create_ami.sh)*
+3. **AMI ID:** `ami-0f70342f66dc80ddb`
 4. **Instance Type:** `g6e.4xlarge`
 5. **Spot:** Enabled
 6. **Spot Max Price:** Set to on-demand price (~$2.00/hr) as cap
 7. **Max Workers:** `10`
 8. **IAM Instance Profile:** `deadline-worker-profile`
 9. **Subnet:** *(select a public subnet in us-west-2)*
-10. **Security Group:** *(worker SG — no inbound SSH required in production)*
+10. **Security Group:** `sg-0f7755ef50058d7a1`
 11. **Pool:** `houdini-aws-gpu`
 12. **Key Pair:** `deadline-ami-build` *(for emergency SSH access; remove in production)*
 
