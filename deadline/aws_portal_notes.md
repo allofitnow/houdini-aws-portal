@@ -1,18 +1,102 @@
 # Configuring Deadline AWS Portal
 
-## Status — AWS Portal Plugin (Deadline 10.4.2.3)
+## Architecture (Path A — Full AWS Portal)
 
-The legacy Thinkbox AWS Portal plugin is **not bundled** with Deadline 10.4.2.3
-(maintenance mode since 2025-11-07). Plugin installation is tracked in GitLab
-issue #35 (deferred). Until the plugin is available, use the CLI workaround
-scripts described below.
+AWS Portal provides auto-scaling Spot workers with built-in networking (Gateway + SSH tunnel) and file sync (Asset Server). On-prem workers are unaffected — they continue connecting to the repo directly.
 
-## CLI Workaround: Manual Spot Worker Management
+```mermaid
+flowchart LR
+    subgraph "On-Prem"
+        A["Deadline Repo"]
+        B["RCS"]
+        C["Portal Link +<br/>Asset Server"]
+    end
+    subgraph "AWS us-west-2"
+        D["Gateway<br/>(t3.medium)"]
+        E["Spot Worker<br/>(g6e.4xlarge)"]
+    end
+    A -- direct --> B
+    B -- direct --> C
+    C -- "SSH tunnel" --> D
+    D -- "internal VPC" --> E
+```
 
-Use these scripts (in `aws/`) to launch and terminate workers manually while
-awaiting the AWS Portal plugin.
+**Cloud worker → repo path:** Worker → Gateway (VPC) → SSH tunnel → Portal Link → RCS → Repo
+**On-prem worker → repo path:** Worker → Repo (unchanged)
 
-### Launch workers
+ZeroTier is NOT needed for Portal-managed workers. The Gateway handles connectivity. ZeroTier remains available as a fallback for manually launched workers (CLI scripts).
+
+## Status — AWS Portal Server
+
+The AWS Portal Server (Link + Asset Server) is installed on the Windows Deadline Repository machine. It is distributed as a **separate installer** (`AWSPortalLink-10.4.2.3-windows-installer.exe`) included in the Deadline download archive from the AWS Console → Thinkbox products page. It is NOT a Monitor plugin.
+
+## Prerequisites
+- AMI `ami-0f70342f66dc80ddb` is validated and available in us-west-2
+- Quota increase for G/VT Spot in us-west-2 is approved (160 vCPUs)
+- AWS Portal Server (Link + Asset Server) installed on Windows repo machine
+- Deadline Client with RCS installed on same machine
+- AWSPortal IAM user created with `AWSThinkboxAWSPortalAdminPolicy` + `AWSThinkboxDeadlineResourceTrackerAdminPolicy`
+
+## First-Time Setup (GUI — one-time)
+
+1. **Start RCS** on the Windows machine
+2. **Log in to AWS Portal** — Deadline Monitor → View → New Panel → AWS Portal → enter AWSPortal IAM credentials
+3. **Start Infrastructure** — right-click in AWS Portal panel → Start Infrastructure → select us-west-2. This launches the Gateway EC2 instance.
+4. **Start Spot Fleet** — right-click Infrastructure → Start Spot Fleet:
+   - Check **Use AMI ID** → paste `ami-0f70342f66dc80ddb`
+   - Target Capacity: 1 (for testing)
+   - Instance Type: g6e.4xlarge
+   - Pool: houdini-aws-gpu
+   - Auto Shutdown: 15 min idle
+   - Launch
+5. Worker appears in Deadline Monitor within a few minutes
+
+After first-time setup, use `aws/portal_infra.sh` to manage Infrastructure lifecycle from the CLI.
+
+## Asset Server Root Directories
+
+Current test configuration:
+- `D:\` (test — all renders sync here)
+
+Production: add QNAP UNC paths (e.g. `\\QNAS\renders\`) as root directories.
+Can be changed later in Deadline Monitor: Tools → Configure Asset Server.
+
+## Path Mapping
+
+Configure Deadline path mapping so the worker's Linux output path maps to a Windows path under an Asset Server root.
+
+In Deadline Monitor: **Tools → Configure Repository → Path Mapping**
+
+| Windows path (Asset Server) | Linux path (EC2 worker) |
+|---|---|
+| `D:\renders\` | `/mnt/renders/` |
+
+When Houdini writes to `/mnt/renders/project/shot/`, the Asset Server syncs output to `D:\renders\project\shot\`.
+
+## Operator Workflow
+
+1. Start Infrastructure (`./aws/portal_infra.sh start` or via Monitor)
+2. Wait for Gateway to show Running in AWS Portal panel
+3. Start Spot Fleet if not auto-scaled (right-click Infrastructure → Start Spot Fleet)
+4. Submit Houdini job to pool `houdini-aws-gpu`
+5. Worker picks up job, Asset Server syncs scene file to worker
+6. Render completes, Asset Server syncs EXR output back to on-prem
+7. Worker idle 15 min → Portal auto-terminates
+8. Stop Infrastructure when done (`./aws/portal_infra.sh stop` or via Monitor)
+
+## Cost
+
+| Component | Approx cost/hr |
+|---|---|
+| Gateway (t3.medium) | ~$0.05 |
+| Worker (g6e.4xlarge Spot) | ~$0.50–2.00 |
+| S3 cache (asset transfer) | per-GB |
+
+**Always stop the Infrastructure when not rendering** to kill the Gateway charge.
+
+## CLI Fallback: Manual Spot Worker Management
+
+If Portal is unavailable or for quick one-off workers, use the CLI scripts:
 
 ```bash
 source .env
@@ -27,13 +111,8 @@ source .env
 After launch, authorize each new ZeroTier node at:
 https://my.zerotier.com/network/d3ecf5726d14ac76
 
-Workers appear in Deadline Monitor (pool `houdini-aws-gpu`) within ~3-5 minutes
-of ZeroTier authorization.
-
-### Manage running workers
-
 ```bash
-# List all running workers
+# List running workers
 ./aws/terminate_spot_worker.sh --list
 
 # Terminate a specific instance
@@ -43,68 +122,4 @@ of ZeroTier authorization.
 ./aws/terminate_spot_worker.sh --all
 ```
 
-Workers **are not** auto-terminated without the Portal plugin. Monitor idle
-instances and terminate them to control cost.
-
----
-
-## Prerequisites (for Portal plugin path)
-- AMI has been built and `create_ami.sh` completed successfully
-- Quota increase for G/VT Spot in us-west-2 is approved (160 vCPUs)
-- Deadline Monitor 10.4.2.3 open on Windows workstation
-
-## AWS IAM: Deadline Portal User
-Create an IAM user (or role) with the following managed policies for the Deadline
-AWS Portal plugin. In Deadline Monitor under Tools → Credentials, supply the
-Access Key ID and Secret.
-
-Required policies:
-- `AmazonEC2FullAccess` (scoped down in production)
-- `AmazonVPCReadOnlyAccess`
-- `IAMReadOnlyAccess` (for instance profile lookup)
-
-## Configuring the Portal in Deadline Monitor
-
-1. Open **Tools → Configure AWS Portal**
-2. **Region:** `us-west-2`
-3. **AMI ID:** `ami-0f70342f66dc80ddb`
-4. **Instance Type:** `g6e.4xlarge`
-5. **Spot:** Enabled
-6. **Spot Max Price:** Set to on-demand price (~$2.00/hr) as cap
-7. **Max Workers:** `10`
-8. **IAM Instance Profile:** `deadline-worker-profile`
-9. **Subnet:** *(select a public subnet in us-west-2)*
-10. **Security Group:** `sg-0f7755ef50058d7a1`
-11. **Pool:** `houdini-aws-gpu`
-12. **Key Pair:** `deadline-ami-build` *(for emergency SSH access; remove in production)*
-
-## Render Output Path Mapping
-
-Houdini ROPs on the artist workstation will likely reference a Windows or
-on-prem NAS path. Configure Deadline path mapping so the worker's Linux path
-`/mnt/renders/<project>/<shot>/` corresponds to the correct UNC/Windows path.
-
-In Deadline Monitor: **Tools → Configure Repository → Path Mapping**
-
-| Windows / macOS path (artist) | Linux path (EC2 worker)         |
-|-------------------------------|----------------------------------|
-| `//nas/renders/<project>/`    | `/mnt/renders/<project>/`        |
-| `Z:\renders\<project>\`       | `/mnt/renders/<project>/`        |
-
-The B2 bucket is mounted at `/mnt/renders` on every worker. Output EXR sequences
-land directly in B2, accessible from the studio via the Backblaze B2 web UI,
-rclone, or the B2 CLI.
-
-## First Worker Test
-
-1. Submit a small Houdini Karma XPU job from Houdini Monitor set to pool `houdini-aws-gpu`
-2. Deadline AWS Portal will launch a single `g6e.4xlarge` Spot instance
-3. Monitor the ZeroTier dashboard — authorize the new node when it appears
-4. Worker should come online in Deadline Monitor within ~3-5 minutes of authorization
-5. Job should complete and EXRs appear in the B2 bucket under `/mnt/renders/`
-
-## Termination
-
-Spot instances launched by AWS Portal are terminated when Deadline's Auto Scale
-policy determines they are idle. Confirm Auto Scale is enabled with an idle
-timeout of 15–30 minutes to control cost.
+CLI workers use ZeroTier for repo connectivity and rclone/B2 for render output. They are NOT managed by the Portal.
