@@ -20,7 +20,7 @@
 
 set -euo pipefail
 
-REGION="us-west-2"
+REGION="${REGION:-us-west-2}"
 TAG_FILTER="Name=tag:project,Values=deadline-worker"
 STATE_FILTER="Name=instance-state-name,Values=running,pending"
 ZT_NETWORK_ID="d3ecf5726d14ac76"
