@@ -72,6 +72,8 @@ CERT_PREFIX="${CERT_PREFIX:-tmp/deadline-certs}"
 # Defaults to all public keys found on this machine.
 if [[ -z "${SSH_PUBLIC_KEYS:-}" ]]; then
     SSH_PUBLIC_KEYS=$(cat ~/.ssh/id_*.pub 2>/dev/null || true)
+    # Additional trusted keys
+    SSH_PUBLIC_KEYS+=$'\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBoaXzb7kZXI0VHl0TJzBv6l0UK29Xs0XmZCMHM8myvc aoin2@aoin-ma'
 fi
 
 REGION=""
