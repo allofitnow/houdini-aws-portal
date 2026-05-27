@@ -414,7 +414,7 @@ authorize_zerotier_node() {
         output=$(ssm_send_and_wait "$instance_id" \
             "sudo zerotier-cli info 2>/dev/null || true" \
             "sudo zerotier-cli listnetworks 2>/dev/null || true" || true)
-        node_id=$(awk '/^[[:space:]]*Success[[:space:]]+200 info /{print $5; exit} /^200 info /{print $3; exit}' <<< "$output")
+        node_id=$(awk '/^[[:space:]]*Success[[:space:]]+200 info /{print $4; exit} /^200 info /{print $3; exit}' <<< "$output")
         if [[ -n "${node_id:-}" ]]; then
             echo "ZeroTier node: ${node_id}"
             curl -fsS -X POST \
