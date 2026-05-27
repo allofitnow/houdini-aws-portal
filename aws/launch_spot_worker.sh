@@ -11,7 +11,7 @@ set -euo pipefail
 
 REGION="us-west-2"
 AMI_ID="ami-0f70342f66dc80ddb"
-INSTANCE_TYPE="g6e.4xlarge"
+INSTANCE_TYPE="g6.xlarge"
 PROFILE="deadline-worker-profile"
 SG_ID="sg-0f7755ef50058d7a1"
 COUNT="${1:-1}"

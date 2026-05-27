@@ -10,7 +10,7 @@
 
 REGION="us-west-2"
 AMI_ID="ami-0ababc7e5826abb79"      # Ubuntu 22.04 LTS, us-west-2, May 2026
-INSTANCE_TYPE="g6e.4xlarge"
+INSTANCE_TYPE="g6.xlarge"
 KEY_NAME="deadline-ami-build"
 PROFILE="deadline-worker-profile"
 SUBNET_ID="CHANGE_ME"               # Public subnet in us-west-2
