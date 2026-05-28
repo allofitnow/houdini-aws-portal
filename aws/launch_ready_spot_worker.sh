@@ -67,6 +67,8 @@ DEADLINE_WORKER_SG_NAME="${DEADLINE_WORKER_SG_NAME:-deadline-worker-sg}"
 # embedding binary/base64 data inline in CLI parameters.
 CERT_BUCKET="${CERT_BUCKET:-renderfarm-installers-774538489810}"
 CERT_PREFIX="${CERT_PREFIX:-tmp/deadline-certs}"
+# Set to "true" to also install GNOME + Amazon DCV on each worker.
+INSTALL_DESKTOP="${INSTALL_DESKTOP:-false}"
 
 # SSH public keys to inject into the worker's ubuntu account.
 # Defaults to all public keys found on this machine.
@@ -544,9 +546,17 @@ inject_ssh_keys "$INSTANCE_ID"
 configure_deadline "$INSTANCE_ID"
 verify_deadline "$INSTANCE_ID"
 
-echo ""
-echo "========================================================"
-echo " Worker ready: ${INSTANCE_ID} in ${REGION}"
-echo " SSH:          ssh ubuntu@<zerotier-ip-of-worker>"
-echo " Deadline:     Worker should appear in Deadline Monitor"
-echo "========================================================"
+# Optionally install GNOME + Amazon DCV
+if [[ "${INSTALL_DESKTOP}" == "true" ]]; then
+    echo ""
+    echo "INSTALL_DESKTOP=true — starting GNOME + DCV setup..."
+    INSTANCE_ID="$INSTANCE_ID" REGION="$REGION"         bash "${SCRIPT_DIR}/setup_desktop.sh" "$INSTANCE_ID" "$REGION"
+else
+    echo ""
+    echo "========================================================"
+    echo " Worker ready: ${INSTANCE_ID} in ${REGION}"
+    echo " SSH:          ssh ubuntu@<zerotier-ip-of-worker>"
+    echo " Deadline:     Worker should appear in Deadline Monitor"
+    echo " Desktop:      Set INSTALL_DESKTOP=true to add GNOME+DCV"
+    echo "========================================================"
+fi
