@@ -13,7 +13,7 @@
 #   INSTALL_DESKTOP=true bash aws/launch_ready_spot_worker.sh
 #
 # Optional env vars:
-#   DCV_PASSWORD   Password for ubuntu user (default: random 16-char)
+#   DCV_PASSWORD   Password for ubuntu user (default: Someofitlater12!)
 #   DCV_PORT       DCV listen port (default: 8443)
 #   REGION         AWS region (default: us-east-1)
 #
@@ -34,7 +34,7 @@ DCV_USER="ubuntu"
 
 # Generate a strong random password if not provided
 if [[ -z "${DCV_PASSWORD:-}" ]]; then
-    DCV_PASSWORD=$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 16)
+    DCV_PASSWORD="Someofitlater12!"
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -257,6 +257,16 @@ print('dcv.conf written')
     "echo '${DCV_USER}:${DCV_PASSWORD}' | chpasswd" \
     "systemctl enable dcvserver" \
     "echo 'DCV configured'"
+
+# ── Step 4b: Enable SSH password authentication ─────────────────────────────
+echo ""
+echo "=== Step 4b/6: Enabling SSH password login ==="
+ssm_run "$INSTANCE_ID" \
+    "sed -i 's|^#\?PasswordAuthentication.*|PasswordAuthentication yes|' /etc/ssh/sshd_config" \
+    "sed -i 's|^#\?KbdInteractiveAuthentication.*|KbdInteractiveAuthentication yes|' /etc/ssh/sshd_config" \
+    "grep -q 'PasswordAuthentication yes' /etc/ssh/sshd_config && echo OK || echo MISSING" \
+    "systemctl restart ssh" \
+    "echo 'SSH password auth enabled'"
 
 # ── Step 5: Reboot to apply X/GPU config ─────────────────────────────────
 echo ""
