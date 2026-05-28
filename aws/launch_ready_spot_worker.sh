@@ -46,7 +46,7 @@ SOURCE_AMI_ID="${SOURCE_AMI_ID:-ami-0f70342f66dc80ddb}"
 INSTANCE_TYPE="${INSTANCE_TYPE:-g5.xlarge}"
 PROFILE="${PROFILE:-deadline-worker-profile}"
 MARKET_OPTIONS='{"MarketType":"spot","SpotOptions":{"SpotInstanceType":"one-time"}}'
-READY_WORKER_REGIONS="${READY_WORKER_REGIONS:-us-east-1,us-east-2,us-west-1,us-west-2}"
+READY_WORKER_REGIONS="${READY_WORKER_REGIONS:-us-west-2,us-east-1,us-east-2,us-west-1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/../.env"
