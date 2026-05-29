@@ -19,6 +19,9 @@
 #   us-east-1, us-east-2, us-west-1, us-west-2
 #
 # Optional environment overrides:
+#   Pre-configured for the AWS Portal VPC in us-west-2 (stackb1e318e8bc14419d8ddfeaa286bc8e70):
+#   SG_ID_US_WEST_2=sg-06103f6429768cd5f
+#   SUBNET_ID_US_WEST_2=subnet-0dbe16a63e7adcd62  (us-west-2a private)
 #   READY_WORKER_REGIONS=us-east-1,us-east-2,us-west-1,us-west-2
 #   SOURCE_AMI_REGION=us-west-2
 #   SOURCE_AMI_ID=ami-0f70342f66dc80ddb
