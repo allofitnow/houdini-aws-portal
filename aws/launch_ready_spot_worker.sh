@@ -62,8 +62,8 @@ ZT_NETWORK_ID="${ZT_NETWORK_ID:-d3ecf5726d14ac76}"
 DEADLINE_RCS_HOST="${DEADLINE_RCS_HOST:-ATXRTX}"
 DEADLINE_RCS_ZT_IP="${DEADLINE_RCS_ZT_IP:-10.147.18.89}"
 DEADLINE_RCS_PORT="${DEADLINE_RCS_PORT:-4433}"
-DEADLINE_CLIENT_PFX="${DEADLINE_CLIENT_PFX:-/mnt/c/Users/aoin/Deadline10Client.pfx}"
-DEADLINE_RCS_CERT="${DEADLINE_RCS_CERT:-/mnt/c/Users/aoin/DeadlineRCSServer.pem}"
+DEADLINE_CLIENT_PFX="${DEADLINE_CLIENT_PFX:-/mnt/c/Users/aoin/.deadline/certs/Deadline10Client.pfx}"
+DEADLINE_RCS_CERT="${DEADLINE_RCS_CERT:-/mnt/c/Users/aoin/.deadline/certs/DeadlineRCSServer.pem}"
 DEADLINE_WORKER_SG_NAME="${DEADLINE_WORKER_SG_NAME:-deadline-worker-sg}"
 
 # S3 bucket/prefix used to stage certificates so SSM can pull them without
