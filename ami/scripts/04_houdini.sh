@@ -4,11 +4,11 @@
 # AWS Deadline Cloud UBL licensing.
 #
 # Licensing method: AWS Deadline Cloud UBL (license endpoint in AWS VPC)
-#   - Workers set HOUDINI_LICENSE_SERVER to the Deadline Cloud license endpoint DNS
+#   - Workers set SideFX hserver to a chained Deadline Cloud license endpoint list
 #   - Endpoint is created via: aws deadline create-license-endpoint (see issue #9)
 #   - Endpoint DNS is stored in Secrets Manager as: houdini/license-endpoint-dns
-#   - Billed through AWS — no SideFX token or sesinetd config required
-#   - Required inbound on worker SG: TCP 1715-1717 from the license endpoint
+#   - Billed through AWS — no SideFX token or local sesinetd required
+#   - Required inbound on worker SG: TCP 1715-1717 from ReverseSlaveSG to itself
 #
 # NOTE: houdini/license-endpoint-dns value is PENDING until the Deadline Cloud
 # license endpoint is created (issue #9). The worker will fail to acquire a
@@ -22,6 +22,7 @@ HOUDINI_VERSION="${HOUDINI_VERSION:-21.0}"
 HOUDINI_BUILD="${HOUDINI_BUILD:-CHANGE_ME}"
 INSTALL_DIR="/opt/hfs${HOUDINI_VERSION}"
 AWS_REGION="${AWS_REGION:-us-west-2}"
+HOUDINI_LICENSE_ENDPOINT_SECRET_ID="${HOUDINI_LICENSE_ENDPOINT_SECRET_ID:-houdini/license-endpoint-dns}"
 
 LOG=/var/log/ami-build.log
 exec >> "$LOG" 2>&1
@@ -55,6 +56,7 @@ echo "source ${INSTALL_DIR}/houdini_setup" > /etc/profile.d/houdini.sh
 chmod +x /etc/profile.d/houdini.sh
 
 # Verify headless render binary
+# shellcheck source=/dev/null
 source "${INSTALL_DIR}/houdini_setup" 2>/dev/null || true
 hython --version || {
     echo "ERROR: hython not found after Houdini install"
@@ -68,12 +70,16 @@ hython --version || {
 # The endpoint DNS is stored as: houdini/license-endpoint-dns
 # Create the endpoint with:
 #   aws deadline create-license-endpoint --vpc-id <VPC> --subnet-ids <SUBNET> \
-#       --security-group-ids <SG> --region us-west-2
-# Then add Houdini as a metered product:
-#   aws deadline create-metered-product --license-endpoint-id <ID> \
-#       --vendor sidefx --product houdini --region us-west-2
+#       --security-group-ids <SG> --region <REGION>
+# Then attach the needed metered products:
+#   aws deadline put-metered-product --license-endpoint-id <ID> \
+#       --product-id houdini-21.0 --region <REGION>
+#   aws deadline put-metered-product --license-endpoint-id <ID> \
+#       --product-id karma-21.0 --region <REGION>
+#   aws deadline put-metered-product --license-endpoint-id <ID> \
+#       --product-id mantra-21.0 --region <REGION>
 # Then update the secret:
-#   aws secretsmanager put-secret-value --secret-id houdini/license-endpoint-dns \
+#   aws secretsmanager put-secret-value --secret-id "$HOUDINI_LICENSE_ENDPOINT_SECRET_ID" \
 #       --secret-string <ENDPOINT_DNS>
 
 cat > /usr/local/sbin/houdini-ubl-init.sh << 'BOOTSCRIPT'
@@ -81,29 +87,64 @@ cat > /usr/local/sbin/houdini-ubl-init.sh << 'BOOTSCRIPT'
 # Fetches the Deadline Cloud UBL license endpoint DNS and writes it to
 # /etc/profile.d/houdini-license.sh so all Houdini processes find the server.
 # Called by houdini-ubl.service on each boot.
+DEFAULT_FILE="/etc/default/houdini-ubl"
+if [[ -f "$DEFAULT_FILE" ]]; then
+    # shellcheck source=/dev/null
+    source "$DEFAULT_FILE"
+fi
+
 AWS_REGION="${AWS_REGION:-us-west-2}"
+HOUDINI_LICENSE_ENDPOINT_SECRET_ID="${HOUDINI_LICENSE_ENDPOINT_SECRET_ID:-houdini/license-endpoint-dns}"
 
 LICENSE_DNS=$(aws secretsmanager get-secret-value \
     --region "$AWS_REGION" \
-    --secret-id "houdini/license-endpoint-dns" \
+    --secret-id "$HOUDINI_LICENSE_ENDPOINT_SECRET_ID" \
     --query SecretString --output text 2>/dev/null)
 
 if [[ -z "$LICENSE_DNS" || "$LICENSE_DNS" == "PENDING" ]]; then
-    echo "WARNING: houdini/license-endpoint-dns is not set. Houdini UBL will not work."
-    echo "         Create the Deadline Cloud license endpoint (see issue #9) and update the secret."
+    echo "WARNING: ${HOUDINI_LICENSE_ENDPOINT_SECRET_ID} is not set in ${AWS_REGION}. Houdini UBL will not work."
+    echo "         Create the regional Deadline Cloud license endpoint and update the secret."
     exit 0
 fi
 
-# Write system-wide env var — picked up by hbatch, hython, karma, mantra
+# SideFX products are exposed by Deadline Cloud UBL on separate ports.
+# hserver supports semicolon-separated license server chaining, which lets
+# Houdini, Karma, and Mantra find their product-specific endpoint ports.
+LICENSE_CHAIN="${LICENSE_DNS}:1715;${LICENSE_DNS}:1716;${LICENSE_DNS}:1717"
+
+# Write system-wide env vars — picked up by Deadline, hbatch, hython, karma, mantra.
 cat > /etc/profile.d/houdini-license.sh << EOF
 # Deadline Cloud UBL — set by houdini-ubl.service at boot
-export HOUDINI_LICENSE_SERVER=${LICENSE_DNS}
+export HOUDINI_LICENSE_SERVER='${LICENSE_CHAIN}'
+export SESI_LMHOST='${LICENSE_CHAIN}'
+export QT_QPA_PLATFORM=offscreen
 EOF
 chmod 644 /etc/profile.d/houdini-license.sh
 
-echo "Houdini license server set to: ${LICENSE_DNS}"
+# Persist hserver's license search list for root, ubuntu, and the system hserver user.
+install -d -m 755 /usr/lib/sesi/hserver /home/ubuntu
+printf 'serverhost=%s
+' "$LICENSE_CHAIN" > /usr/lib/sesi/hserver/.sesi_licenses.pref
+printf 'serverhost=%s
+' "$LICENSE_CHAIN" > /root/.sesi_licenses.pref
+printf 'serverhost=%s
+' "$LICENSE_CHAIN" > /home/ubuntu/.sesi_licenses.pref
+chown ubuntu:ubuntu /home/ubuntu/.sesi_licenses.pref 2>/dev/null || true
+chmod 644 /usr/lib/sesi/hserver/.sesi_licenses.pref /root/.sesi_licenses.pref /home/ubuntu/.sesi_licenses.pref
+
+# Restart hserver if it was launched before the endpoint was configured.
+pkill -f hserver 2>/dev/null || true
+
+echo "Houdini license server chain set to: ${LICENSE_CHAIN}"
 BOOTSCRIPT
 chmod 700 /usr/local/sbin/houdini-ubl-init.sh
+
+cat > /etc/default/houdini-ubl << EOF
+# Defaults used by houdini-ubl.service; launch scripts may override these per worker region.
+AWS_REGION=${AWS_REGION}
+HOUDINI_LICENSE_ENDPOINT_SECRET_ID=${HOUDINI_LICENSE_ENDPOINT_SECRET_ID}
+EOF
+chmod 644 /etc/default/houdini-ubl
 
 # systemd unit — runs before Deadline worker starts
 cat > /etc/systemd/system/houdini-ubl.service << 'UNIT'
@@ -128,4 +169,4 @@ systemctl enable houdini-ubl.service
 rm -rf "$TMP_DIR"
 
 echo "==> [04] Houdini ${HOUDINI_VERSION}.${HOUDINI_BUILD} install complete"
-echo "==> [04] UBL: license endpoint DNS will be set at boot from houdini/license-endpoint-dns secret"
+echo "==> [04] UBL: license endpoint DNS will be set at boot from ${HOUDINI_LICENSE_ENDPOINT_SECRET_ID} in ${AWS_REGION}"

@@ -15,27 +15,29 @@
 # Usage:
 #   ./aws/launch_ready_spot_worker.sh
 #
-# Region fallback order (default):
-#   us-east-1, us-east-2, us-west-1, us-west-2
+# Region fallback order is explicit. Each enabled region must already have:
+#   - an AMI available in that region, or a matching copied AMI name
+#   - a Portal/worker subnet and security group
+#   - a regional Deadline Cloud license endpoint DNS secret
 #
 # Optional environment overrides:
-#   Pre-configured for the AWS Portal VPC in us-west-2 (stackb1e318e8bc14419d8ddfeaa286bc8e70):
-#   SG_ID_US_WEST_2=sg-09335256539b1c0f0
-#   SUBNET_ID_US_WEST_2=subnet-0dbe16a63e7adcd62  (us-west-2a private)
-#   READY_WORKER_REGIONS=us-east-1,us-east-2,us-west-1,us-west-2
+#   READY_WORKER_REGIONS=us-west-2,us-east-1,eu-west-1
 #   SOURCE_AMI_REGION=us-west-2
 #   SOURCE_AMI_ID=ami-0f70342f66dc80ddb
 #   AMI_ID_US_EAST_1=ami-...
 #   SUBNET_ID_US_EAST_1=subnet-...
 #   SG_ID_US_EAST_1=sg-...
+#   HOUDINI_LICENSE_ENDPOINT_SECRET_ID=houdini/license-endpoint-dns
+#   HOUDINI_LICENSE_ENDPOINT_SECRET_ID_US_EAST_1=houdini/license-endpoint-dns
 #   INSTANCE_TYPE=g5.xlarge
-#   DEADLINE_CLIENT_PFX=/mnt/c/Users/aoin/Deadline10Client.pfx
-#   DEADLINE_RCS_CERT=/mnt/c/Users/aoin/DeadlineRCSServer.pem
+#   DEADLINE_CLIENT_PFX=/mnt/c/Users/aoin/.deadline/certs/Deadline10Client.pfx
+#   DEADLINE_RCS_CERT=/mnt/c/Users/aoin/.deadline/certs/DeadlineRCSServer.pem
 #   DEADLINE_RCS_HOST=ATXRTX
 #   DEADLINE_RCS_ZT_IP=10.147.18.89
 #   DEADLINE_RCS_PORT=4433
 #   ZT_NETWORK_ID=d3ecf5726d14ac76
 #   CERT_BUCKET=renderfarm-installers-774538489810
+#   CERT_BUCKET_REGION=us-east-1
 #   CERT_PREFIX=tmp/deadline-certs
 #   SSH_PUBLIC_KEYS_FILE=~/.ssh/authorized_keys  (or set SSH_PUBLIC_KEYS directly)
 
@@ -49,10 +51,13 @@ SOURCE_AMI_ID="${SOURCE_AMI_ID:-ami-0f70342f66dc80ddb}"
 INSTANCE_TYPE="${INSTANCE_TYPE:-g5.xlarge}"
 PROFILE="${PROFILE:-deadline-worker-profile}"
 MARKET_OPTIONS='{"MarketType":"spot","SpotOptions":{"SpotInstanceType":"one-time"}}'
-# Only us-west-2 has the UBL VPC endpoint for Houdini licensing.
-# To enable other regions, replicate the VPC endpoint there first,
-# then add the region to this list.
-READY_WORKER_REGIONS="${READY_WORKER_REGIONS:-us-west-2}"
+# Comma-separated list of regions that already have Portal networking and a
+# regional Deadline Cloud license endpoint secret. Keep the default conservative.
+READY_WORKER_REGIONS="${READY_WORKER_REGIONS:-${REGION:-us-west-2}}"
+REQUIRE_REGION_NETWORK_CONFIG="${REQUIRE_REGION_NETWORK_CONFIG:-true}"
+ALLOW_CREATE_WORKER_SG="${ALLOW_CREATE_WORKER_SG:-false}"
+REQUIRE_LICENSE_ENDPOINT_SECRET="${REQUIRE_LICENSE_ENDPOINT_SECRET:-true}"
+HOUDINI_LICENSE_ENDPOINT_SECRET_ID="${HOUDINI_LICENSE_ENDPOINT_SECRET_ID:-houdini/license-endpoint-dns}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/../.env"
@@ -72,6 +77,7 @@ DEADLINE_WORKER_SG_NAME="${DEADLINE_WORKER_SG_NAME:-deadline-worker-sg}"
 # S3 bucket/prefix used to stage certificates so SSM can pull them without
 # embedding binary/base64 data inline in CLI parameters.
 CERT_BUCKET="${CERT_BUCKET:-renderfarm-installers-774538489810}"
+CERT_BUCKET_REGION="${CERT_BUCKET_REGION:-us-east-1}"
 CERT_PREFIX="${CERT_PREFIX:-tmp/deadline-certs}"
 # Set to "true" to also install GNOME + Amazon DCV on each worker.
 INSTALL_DESKTOP="${INSTALL_DESKTOP:-false}"
@@ -89,6 +95,7 @@ AMI_ID=""
 INSTANCE_ID=""
 SUBNET_ID_SELECTED=""
 SG_ID_SELECTED=""
+LICENSE_ENDPOINT_SECRET_ID_SELECTED=""
 SOURCE_AMI_NAME=""
 
 # ---------------------------------------------------------------------------
@@ -117,6 +124,41 @@ region_env_value() {
     key="${key//-/_}"
     key="${prefix}_${key}"
     printf '%s' "${!key:-}"
+}
+
+resolve_license_endpoint_secret_id() {
+    local region="$1"
+    local override
+
+    override=$(region_env_value HOUDINI_LICENSE_ENDPOINT_SECRET_ID "$region")
+    if [[ -n "$override" ]]; then
+        printf '%s' "$override"
+        return 0
+    fi
+
+    printf '%s' "$HOUDINI_LICENSE_ENDPOINT_SECRET_ID"
+}
+
+region_has_license_endpoint_secret() {
+    local region="$1"
+    local secret_id="$2"
+    local secret_value
+
+    if [[ "$REQUIRE_LICENSE_ENDPOINT_SECRET" != "true" ]]; then
+        return 0
+    fi
+
+    secret_value=$(aws secretsmanager get-secret-value \
+        --region "$region" \
+        --secret-id "$secret_id" \
+        --query SecretString \
+        --output text 2>/dev/null || true)
+
+    if [[ -z "$secret_value" || "$secret_value" == "None" || "$secret_value" == "PENDING" ]]; then
+        return 1
+    fi
+
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -178,13 +220,19 @@ resolve_subnets() {
 
     override=$(region_env_value SUBNET_ID "$region")
     if [[ -n "$override" ]]; then
-        printf '%s\n' $override
+        read -r -a subnet_override_values <<< "$override"
+        printf '%s\n' "${subnet_override_values[@]}"
         return 0
     fi
 
     if [[ "$region" == "$SOURCE_AMI_REGION" && -n "${SUBNET_ID:-}" ]]; then
-        printf '%s\n' $SUBNET_ID
+        read -r -a subnet_override_values <<< "$SUBNET_ID"
+        printf '%s\n' "${subnet_override_values[@]}"
         return 0
+    fi
+
+    if [[ "$REQUIRE_REGION_NETWORK_CONFIG" == "true" ]]; then
+        return 1
     fi
 
     subnet_ids=$(aws ec2 describe-subnets \
@@ -197,7 +245,8 @@ resolve_subnets() {
         return 1
     fi
 
-    printf '%s\n' $subnet_ids
+    read -r -a subnet_values <<< "$subnet_ids"
+    printf '%s\n' "${subnet_values[@]}"
 }
 
 resolve_security_group() {
@@ -233,6 +282,10 @@ resolve_security_group() {
         return 0
     fi
 
+    if [[ "$ALLOW_CREATE_WORKER_SG" != "true" ]]; then
+        return 1
+    fi
+
     group_id=$(aws ec2 create-security-group \
         --region "$region" \
         --group-name "$DEADLINE_WORKER_SG_NAME" \
@@ -254,13 +307,19 @@ resolve_security_group() {
 # Launch with region/AZ fallback
 # ---------------------------------------------------------------------------
 launch_instance_with_fallback() {
-    local regions_string regions candidate ami subnet sg name err_file output_file
+    local regions_string regions candidate ami subnet sg license_secret_id name err_file output_file
     regions_string="${READY_WORKER_REGIONS//,/ }"
     read -r -a regions <<< "$regions_string"
 
     for candidate in "${regions[@]}"; do
         [[ -z "$candidate" ]] && continue
         echo "Trying ${candidate}..."
+
+        license_secret_id=$(resolve_license_endpoint_secret_id "$candidate")
+        if ! region_has_license_endpoint_secret "$candidate" "$license_secret_id"; then
+            echo "  No usable Houdini UBL endpoint secret '${license_secret_id}' in ${candidate}; skipping."
+            continue
+        fi
 
         if ! ami=$(resolve_ami "$candidate"); then
             echo "  No matching AMI found in ${candidate}; skipping."
@@ -310,6 +369,7 @@ launch_instance_with_fallback() {
                 AMI_ID="$ami"
                 SUBNET_ID_SELECTED="$subnet"
                 SG_ID_SELECTED="$sg"
+                LICENSE_ENDPOINT_SECRET_ID_SELECTED="$license_secret_id"
                 INSTANCE_ID=$(cat "$output_file")
                 rm -f "$err_file" "$output_file"
                 echo "Launched ${INSTANCE_ID} in ${REGION} (${az})."
@@ -470,11 +530,25 @@ stage_certs_to_s3() {
     echo "Staging Deadline certificates to s3://${CERT_BUCKET}/${CERT_PREFIX}/..."
     aws s3 cp "$DEADLINE_CLIENT_PFX" \
         "s3://${CERT_BUCKET}/${CERT_PREFIX}/Deadline10Client.pfx" \
-        --region us-east-1 >/dev/null
+        --region "$CERT_BUCKET_REGION" >/dev/null
     aws s3 cp "$DEADLINE_RCS_CERT" \
         "s3://${CERT_BUCKET}/${CERT_PREFIX}/DeadlineRCSServer.pem" \
-        --region us-east-1 >/dev/null
+        --region "$CERT_BUCKET_REGION" >/dev/null
     echo "Certificates staged."
+}
+
+
+configure_houdini_ubl_runtime() {
+    local instance_id="$1"
+    local secret_id
+    secret_id="${LICENSE_ENDPOINT_SECRET_ID_SELECTED:-$(resolve_license_endpoint_secret_id "$REGION")}"
+
+    echo "Configuring Houdini UBL runtime defaults for ${REGION} (${secret_id})..."
+    ssm_send_and_wait "$instance_id" \
+        "printf '%s\\n' '# Set by launch_ready_spot_worker.sh for the selected worker region' 'AWS_REGION=${REGION}' 'HOUDINI_LICENSE_ENDPOINT_SECRET_ID=${secret_id}' | sudo tee /etc/default/houdini-ubl >/dev/null" \
+        "sudo chmod 644 /etc/default/houdini-ubl" \
+        "sudo systemctl restart houdini-ubl.service || sudo /usr/local/sbin/houdini-ubl-init.sh || true" \
+        "test -f /etc/profile.d/houdini-license.sh && echo HOUDINI_UBL_CONFIGURED || echo HOUDINI_UBL_NOT_READY"
 }
 
 configure_deadline() {
@@ -485,8 +559,8 @@ configure_deadline() {
 
     ssm_send_and_wait "$instance_id" \
         "sudo mkdir -p /var/lib/Thinkbox/Deadline10/certs" \
-        "aws s3 cp s3://${CERT_BUCKET}/${CERT_PREFIX}/Deadline10Client.pfx /var/lib/Thinkbox/Deadline10/certs/Deadline10Client.pfx --region ${REGION}" \
-        "aws s3 cp s3://${CERT_BUCKET}/${CERT_PREFIX}/DeadlineRCSServer.pem /var/lib/Thinkbox/Deadline10/certs/DeadlineRCSServer.pem --region ${REGION}" \
+        "aws s3 cp s3://${CERT_BUCKET}/${CERT_PREFIX}/Deadline10Client.pfx /var/lib/Thinkbox/Deadline10/certs/Deadline10Client.pfx --region ${CERT_BUCKET_REGION}" \
+        "aws s3 cp s3://${CERT_BUCKET}/${CERT_PREFIX}/DeadlineRCSServer.pem /var/lib/Thinkbox/Deadline10/certs/DeadlineRCSServer.pem --region ${CERT_BUCKET_REGION}" \
         "sudo chmod 600 /var/lib/Thinkbox/Deadline10/certs/Deadline10Client.pfx" \
         "sudo chmod 644 /var/lib/Thinkbox/Deadline10/certs/DeadlineRCSServer.pem" \
         "grep -qE '[[:space:]]${DEADLINE_RCS_HOST}$' /etc/hosts && sudo sed -i 's|^.*[[:space:]]${DEADLINE_RCS_HOST}$|${DEADLINE_RCS_ZT_IP} ${DEADLINE_RCS_HOST}|' /etc/hosts || echo '${DEADLINE_RCS_ZT_IP} ${DEADLINE_RCS_HOST}' | sudo tee -a /etc/hosts" \
@@ -509,6 +583,7 @@ verify_deadline() {
 
     echo "Verifying Deadline registration (up to 4 minutes)..."
     for _ in {1..24}; do
+        # shellcheck disable=SC2016
         output=$(ssm_send_and_wait "$instance_id" \
             'WORKER_NAME=$(hostname); echo "WORKER_NAME=${WORKER_NAME}"' \
             '/opt/Thinkbox/Deadline10/bin/deadlinecommand -GetSlaveNames 2>&1 || true' \
@@ -549,6 +624,7 @@ wait_for_ssm "$INSTANCE_ID"
 regenerate_zerotier_identity "$INSTANCE_ID"
 authorize_zerotier_node "$INSTANCE_ID"
 inject_ssh_keys "$INSTANCE_ID"
+configure_houdini_ubl_runtime "$INSTANCE_ID"
 configure_deadline "$INSTANCE_ID"
 verify_deadline "$INSTANCE_ID"
 
@@ -556,11 +632,14 @@ verify_deadline "$INSTANCE_ID"
 if [[ "${INSTALL_DESKTOP}" == "true" ]]; then
     echo ""
     echo "INSTALL_DESKTOP=true — starting GNOME + DCV setup..."
-    INSTANCE_ID="$INSTANCE_ID" REGION="$REGION"         bash "${SCRIPT_DIR}/setup_desktop.sh" "$INSTANCE_ID" "$REGION"
+    bash "${SCRIPT_DIR}/setup_desktop.sh" "$INSTANCE_ID" "$REGION"
 else
     echo ""
     echo "========================================================"
     echo " Worker ready: ${INSTANCE_ID} in ${REGION}"
+    echo " AMI:          ${AMI_ID}"
+    echo " Subnet:       ${SUBNET_ID_SELECTED}"
+    echo " Security SG:  ${SG_ID_SELECTED}"
     echo " SSH:          ssh ubuntu@<zerotier-ip-of-worker>"
     echo " Deadline:     Worker should appear in Deadline Monitor"
     echo " Desktop:      Set INSTALL_DESKTOP=true to add GNOME+DCV"

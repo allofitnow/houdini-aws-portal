@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # terminate_spot_worker.sh
-# List or gracefully terminate Spot workers tagged project=deadline-worker.
+# List or gracefully terminate manual Spot workers tagged project=deadline-worker.
 #
 # Graceful termination does best-effort cleanup before terminating EC2:
 #   - delete the Worker from Deadline via deadlinecommand -DeleteSlave
@@ -9,40 +9,64 @@
 #   - terminate the EC2 instance
 #
 # Preconditions:
-#   - AWS CLI configured for account 774538489810, region us-west-2
+#   - AWS CLI configured for account 774538489810
 #   - For cleanup: instance has SSM online and IAM permission for ssm:SendCommand/GetCommandInvocation
 #   - For ZeroTier removal: .env has ZEROTIER_API_TOKEN or env var is exported
-#
-# Usage:
-#   ./terminate_spot_worker.sh --list           List running workers
-#   ./terminate_spot_worker.sh <instance-id>    Gracefully terminate specific instance
-#   ./terminate_spot_worker.sh --all            Gracefully terminate all project workers
 
 set -euo pipefail
 
-REGION="${REGION:-us-west-2}"
+REGION="${REGION:-${AWS_REGION:-us-west-2}}"
 TAG_FILTER="Name=tag:project,Values=deadline-worker"
 STATE_FILTER="Name=instance-state-name,Values=running,pending"
-ZT_NETWORK_ID="d3ecf5726d14ac76"
+ZT_NETWORK_ID="${ZT_NETWORK_ID:-d3ecf5726d14ac76}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/../.env"
+COMMAND=""
+INSTANCE_ID=""
 
 if [[ -f "$ENV_FILE" ]]; then
     # shellcheck source=/dev/null
     source "$ENV_FILE"
 fi
 
+usage() {
+    cat >&2 <<USAGE
+Usage: $0 [--region REGION] --list | --all | <instance-id>
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --region|--aws-region) REGION="$2"; shift 2 ;;
+        --list|--all) COMMAND="$1"; shift ;;
+        i-*) COMMAND="instance"; INSTANCE_ID="$1"; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "ERROR: Unknown argument '$1'" >&2; usage; exit 1 ;;
+    esac
+done
+
 list_workers() {
-    aws ec2 describe-instances         --region "$REGION"         --filters "$TAG_FILTER" "$STATE_FILTER"         --query "Reservations[].Instances[].[InstanceId,State.Name,InstanceType,LaunchTime,Tags[?Key=='Name']|[0].Value]"         --output table
+    aws ec2 describe-instances \
+        --region "$REGION" \
+        --filters "$TAG_FILTER" "$STATE_FILTER" \
+        --query "Reservations[].Instances[].[InstanceId,State.Name,InstanceType,LaunchTime,Tags[?Key=='Name']|[0].Value]" \
+        --output table
 }
 
 ssm_run_cleanup() {
     local id="$1"
     local command_id status output worker_name zt_node_id
 
-    echo "Running Deadline/ZeroTier pre-termination cleanup on ${id} via SSM..."
+    echo "Running Deadline/ZeroTier pre-termination cleanup on ${id} via SSM in ${REGION}..."
 
-    command_id=$(aws ssm send-command         --region "$REGION"         --instance-ids "$id"         --document-name AWS-RunShellScript         --parameters 'commands=["WORKER_NAME=$(hostname)","ZT_NODE_ID=$(sudo zerotier-cli info 2>/dev/null | cut -d' ' -f3 || true)","echo DEADLINE_WORKER_NAME=${WORKER_NAME}","echo ZEROTIER_NODE_ID=${ZT_NODE_ID}","if [ -x /opt/Thinkbox/Deadline10/bin/deadlinecommand ]; then /opt/Thinkbox/Deadline10/bin/deadlinecommand -DeleteSlave ${WORKER_NAME} || true; fi","sudo systemctl stop deadline10launcher || true"]'         --query Command.CommandId         --output text 2>/dev/null || true)
+    # shellcheck disable=SC2016
+    command_id=$(aws ssm send-command \
+        --region "$REGION" \
+        --instance-ids "$id" \
+        --document-name AWS-RunShellScript \
+        --parameters 'commands=["WORKER_NAME=$(hostname)","ZT_NODE_ID=$(sudo zerotier-cli info 2>/dev/null | cut -d'"'"' '"'"' -f3 || true)","echo DEADLINE_WORKER_NAME=${WORKER_NAME}","echo ZEROTIER_NODE_ID=${ZT_NODE_ID}","if [ -x /opt/Thinkbox/Deadline10/bin/deadlinecommand ]; then /opt/Thinkbox/Deadline10/bin/deadlinecommand -DeleteSlave ${WORKER_NAME} || true; fi","sudo systemctl stop deadline10launcher || true"]' \
+        --query Command.CommandId \
+        --output text 2>/dev/null || true)
 
     if [[ -z "${command_id:-}" || "$command_id" == "None" ]]; then
         echo "WARNING: Could not start SSM cleanup for ${id}; continuing with EC2 termination." >&2
@@ -50,14 +74,24 @@ ssm_run_cleanup() {
     fi
 
     for _ in {1..30}; do
-        status=$(aws ssm get-command-invocation             --region "$REGION"             --command-id "$command_id"             --instance-id "$id"             --query Status             --output text 2>/dev/null || true)
+        status=$(aws ssm get-command-invocation \
+            --region "$REGION" \
+            --command-id "$command_id" \
+            --instance-id "$id" \
+            --query Status \
+            --output text 2>/dev/null || true)
         case "$status" in
             Success|Cancelled|TimedOut|Failed|Cancelling) break ;;
         esac
         sleep 2
     done
 
-    output=$(aws ssm get-command-invocation         --region "$REGION"         --command-id "$command_id"         --instance-id "$id"         --query StandardOutputContent         --output text 2>/dev/null || true)
+    output=$(aws ssm get-command-invocation \
+        --region "$REGION" \
+        --command-id "$command_id" \
+        --instance-id "$id" \
+        --query StandardOutputContent \
+        --output text 2>/dev/null || true)
 
     echo "$output"
 
@@ -84,7 +118,10 @@ remove_zerotier_member() {
     fi
 
     echo "Removing ZeroTier member ${node_id} from network ${ZT_NETWORK_ID}..."
-    curl -fsS -X DELETE         -H "Authorization: token ${ZEROTIER_API_TOKEN}"         "https://api.zerotier.com/api/v1/network/${ZT_NETWORK_ID}/member/${node_id}"         >/dev/null || echo "WARNING: ZeroTier member removal failed for ${node_id}." >&2
+    curl -fsS -X DELETE \
+        -H "Authorization: token ${ZEROTIER_API_TOKEN}" \
+        "https://api.zerotier.com/api/v1/network/${ZT_NETWORK_ID}/member/${node_id}" \
+        >/dev/null || echo "WARNING: ZeroTier member removal failed for ${node_id}." >&2
 }
 
 terminate_one() {
@@ -92,12 +129,20 @@ terminate_one() {
 
     ssm_run_cleanup "$id"
 
-    aws ec2 terminate-instances         --region "$REGION"         --instance-ids "$id"         --query "TerminatingInstances[0].[InstanceId,CurrentState.Name]"         --output table
+    aws ec2 terminate-instances \
+        --region "$REGION" \
+        --instance-ids "$id" \
+        --query "TerminatingInstances[0].[InstanceId,CurrentState.Name]" \
+        --output table
     echo "Terminated: ${id}"
 }
 
 terminate_all() {
-    mapfile -t ids < <(aws ec2 describe-instances         --region "$REGION"         --filters "$TAG_FILTER" "$STATE_FILTER"         --query "Reservations[].Instances[].InstanceId"         --output text)
+    mapfile -t ids < <(aws ec2 describe-instances \
+        --region "$REGION" \
+        --filters "$TAG_FILTER" "$STATE_FILTER" \
+        --query "Reservations[].Instances[].InstanceId" \
+        --output text)
 
     local clean_ids=()
     for id in "${ids[@]}"; do
@@ -105,28 +150,28 @@ terminate_all() {
     done
 
     if [[ ${#clean_ids[@]} -eq 0 ]]; then
-        echo "No running deadline-worker instances found."
+        echo "No running deadline-worker instances found in ${REGION}."
         return
     fi
 
-    echo "Gracefully terminating ${#clean_ids[@]} instance(s): ${clean_ids[*]}"
+    echo "Gracefully terminating ${#clean_ids[@]} instance(s) in ${REGION}: ${clean_ids[*]}"
     for id in "${clean_ids[@]}"; do
         terminate_one "$id"
     done
 }
 
-if [[ $# -lt 1 ]]; then
-    echo "Usage: $0 --list | --all | <instance-id>" >&2
+if [[ -z "$COMMAND" ]]; then
+    usage
     exit 1
 fi
 
-case "$1" in
+case "$COMMAND" in
     --list) list_workers ;;
     --all)  terminate_all ;;
-    i-*)    terminate_one "$1" ;;
+    instance) terminate_one "$INSTANCE_ID" ;;
     *)
-        echo "ERROR: Unknown argument '${1}'" >&2
-        echo "Usage: $0 --list | --all | <instance-id>" >&2
+        echo "ERROR: Unknown command '${COMMAND}'" >&2
+        usage
         exit 1
         ;;
 esac

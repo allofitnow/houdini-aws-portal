@@ -15,7 +15,7 @@ apt-get upgrade -y
 apt-get install -y \
     build-essential \
     dkms \
-    linux-headers-$(uname -r) \
+    "linux-headers-$(uname -r)" \
     curl \
     wget \
     unzip \
@@ -24,7 +24,19 @@ apt-get install -y \
     awscli \
     ca-certificates \
     gnupg \
-    lsb-release
+    lsb-release \
+    libxkbcommon0 \
+    libxkbcommon-x11-0 \
+    libxcb-cursor0 \
+    libxcb-icccm4 \
+    libxcb-image0 \
+    libxcb-keysyms1 \
+    libxcb-render-util0 \
+    libxcb-shape0 \
+    libxcb-randr0 \
+    libxcb-xfixes0 \
+    libxcb-xinerama0 \
+    libxss1
 
 # Disable Nouveau (conflicts with NVIDIA data center driver)
 cat > /etc/modprobe.d/blacklist-nouveau.conf << 'EOF'

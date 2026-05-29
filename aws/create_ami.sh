@@ -2,20 +2,37 @@
 # create_ami.sh
 # Stop the build instance and create the worker AMI from it.
 # Run from your local workstation after build.sh completes on the instance.
-#
-# Usage: ./create_ami.sh <INSTANCE_ID>
 
-REGION="us-west-2"
-AMI_NAME="deadline-10.4.2.3-houdini-21.0-ubuntu22-l40s-v1"
-AMI_DESC="Deadline 10.4.2.3 + Houdini 21.0 UBL + ZeroTier + rclone B2. Ubuntu 22.04, NVIDIA L40S driver 535. us-west-2."
+set -euo pipefail
 
-INSTANCE_ID="${1:-}"
+REGION="${REGION:-${AWS_REGION:-us-west-2}}"
+AMI_NAME="${AMI_NAME:-deadline-10.4.2.3-houdini-21.0-ubuntu22-gpu-v1}"
+AMI_DESC="${AMI_DESC:-Deadline 10.4.2.3 + Houdini 21.0 UBL + ZeroTier + rclone B2. Ubuntu 22.04, NVIDIA GPU driver. Region ${REGION}.}"
+INSTANCE_ID=""
+
+usage() {
+    cat >&2 <<USAGE
+Usage: $0 <INSTANCE_ID> [--region REGION] [--name AMI_NAME] [--description AMI_DESC]
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --region|--aws-region) REGION="$2"; shift 2 ;;
+        --name|--ami-name) AMI_NAME="$2"; shift 2 ;;
+        --description|--ami-desc) AMI_DESC="$2"; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        i-*) INSTANCE_ID="$1"; shift ;;
+        *) echo "ERROR: Unknown argument '$1'" >&2; usage; exit 1 ;;
+    esac
+done
+
 if [[ -z "$INSTANCE_ID" ]]; then
-    echo "Usage: $0 <INSTANCE_ID>"
+    usage
     exit 1
 fi
 
-echo "Stopping instance $INSTANCE_ID before imaging..."
+echo "Stopping instance $INSTANCE_ID in ${REGION} before imaging..."
 aws ec2 stop-instances --region "$REGION" --instance-ids "$INSTANCE_ID" > /dev/null
 aws ec2 wait instance-stopped --region "$REGION" --instance-ids "$INSTANCE_ID"
 echo "Instance stopped."
@@ -27,7 +44,7 @@ AMI_ID=$(aws ec2 create-image \
     --name "$AMI_NAME" \
     --description "$AMI_DESC" \
     --no-reboot \
-    --tag-specifications "ResourceType=image,Tags=[{Key=Name,Value=${AMI_NAME}},{Key=DeadlineVersion,Value=10.4.2.3},{Key=HoudiniVersion,Value=21.0}]" \
+    --tag-specifications "ResourceType=image,Tags=[{Key=Name,Value=${AMI_NAME}},{Key=DeadlineVersion,Value=10.4.2.3},{Key=HoudiniVersion,Value=21.0},{Key=Region,Value=${REGION}}]" \
     --query "ImageId" \
     --output text)
 
@@ -41,5 +58,5 @@ echo "  AMI ID   : $AMI_ID"
 echo "  AMI Name : $AMI_NAME"
 echo "  Region   : $REGION"
 echo ""
-echo "Next: Register this AMI in Deadline Monitor > Tools > Configure AWS Portal"
+echo "Next: register this region-local AMI in Deadline Monitor > Tools > Configure AWS Portal."
 echo "See deadline/aws_portal_notes.md for full configuration steps."

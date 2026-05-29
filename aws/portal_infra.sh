@@ -1,20 +1,65 @@
 #!/usr/bin/env bash
 # portal_infra.sh
-# Monitor and tear down Deadline AWS Portal infrastructure in us-west-2.
+# Monitor and tear down Deadline AWS Portal infrastructure for the selected AWS region.
 # Portal infrastructure is managed via CloudFormation stacks created by Deadline.
-# STARTING an infrastructure must be done via Deadline Monitor (View → AWS Portal → Start Infrastructure).
+# STARTING an infrastructure must be done via Deadline Monitor.
 # STOPPING and STATUS can be handled by this script.
 # Preconditions:
-#   - AWS CLI configured for account 774538489810, region us-west-2
+#   - AWS CLI configured for account 774538489810
 #   - Deadline AWS Portal has been set up (Portal Link + Asset Server installed)
+#   - Each worker region has its own Portal infrastructure stack and UBL endpoint
 
 set -euo pipefail
 
-REGION="us-west-2"
+REGION="${REGION:-${AWS_REGION:-us-west-2}}"
+SPOT_AMI_ID="${SPOT_AMI_ID:-${AMI_ID:-}}"
+SPOT_INSTANCE_TYPE="${SPOT_INSTANCE_TYPE:-g6e.4xlarge}"
+SPOT_POOL="${SPOT_POOL:-houdini-aws-gpu}"
+SPOT_TARGET_CAPACITY="${SPOT_TARGET_CAPACITY:-1}"
+SPOT_AUTO_SHUTDOWN_MINUTES="${SPOT_AUTO_SHUTDOWN_MINUTES:-15}"
+COMMAND=""
 
-# --- Helper functions ---
+usage() {
+    cat >&2 <<USAGE
+Usage: $0 [--region REGION] {status|stop|start}
 
-# Portal CloudFormation stacks are prefixed with "stack" or "deadline"
+Environment overrides:
+  REGION / AWS_REGION             AWS region to inspect or manage
+  SPOT_AMI_ID / AMI_ID            Region-local worker AMI ID to paste in Portal
+  SPOT_INSTANCE_TYPE              Instance type for Portal Spot Fleet guidance
+  SPOT_POOL                       Deadline pool for Portal Spot Fleet guidance
+  SPOT_TARGET_CAPACITY            Target capacity for Portal Spot Fleet guidance
+  SPOT_AUTO_SHUTDOWN_MINUTES      Portal idle auto-shutdown guidance
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --region|--aws-region)
+            REGION="$2"
+            shift 2
+            ;;
+        --ami-id)
+            SPOT_AMI_ID="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        status|stop|start)
+            COMMAND="$1"
+            shift
+            ;;
+        *)
+            echo "ERROR: Unknown argument '$1'" >&2
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+# Portal CloudFormation stacks are prefixed with "stack" or "deadline".
 get_portal_stacks() {
     aws cloudformation list-stacks \
         --region "$REGION" \
@@ -23,7 +68,7 @@ get_portal_stacks() {
         --output table 2>/dev/null || echo "No Portal stacks found."
 }
 
-# Gateway instances are tagged Name=Gateway (or ReverseForwarder for older versions)
+# Gateway instances are tagged Name=Gateway (or ReverseForwarder for older versions).
 get_gateway_instances() {
     aws ec2 describe-instances \
         --region "$REGION" \
@@ -32,7 +77,7 @@ get_gateway_instances() {
         --output table 2>/dev/null || echo "No Gateway instances found."
 }
 
-# Portal workers use AWSPortalWorkerRole instance profile
+# Portal workers use AWSPortalWorkerRole instance profile.
 get_portal_workers() {
     aws ec2 describe-instances \
         --region "$REGION" \
@@ -41,15 +86,13 @@ get_portal_workers() {
         --output table 2>/dev/null || echo "No Portal worker instances found."
 }
 
-# Spot fleet requests managed by Portal
+# Spot fleet requests managed by Portal.
 get_spot_fleets() {
     aws ec2 describe-spot-fleet-requests \
         --region "$REGION" \
         --query "SpotFleetRequestConfigs[?starts_with(SpotFleetRequestId,'sfr')].[SpotFleetRequestId,SpotFleetRequestState,FulfilledCapacity,TargetCapacity]" \
         --output table 2>/dev/null || echo "No Spot Fleet requests found."
 }
-
-# --- Commands ---
 
 cmd_status() {
     echo "=== AWS Portal Infrastructure Status (${REGION}) ==="
@@ -71,7 +114,6 @@ cmd_status() {
     get_spot_fleets
     echo ""
 
-    # Cost reminder
     local gateway_count
     gateway_count=$(aws ec2 describe-instances \
         --region "$REGION" \
@@ -89,17 +131,16 @@ cmd_status() {
     if [[ "${gateway_count}" != "0" || "${worker_count}" != "0" ]]; then
         echo "!! ${gateway_count} Gateway(s) + ${worker_count} Worker(s) are running."
         echo "!! Estimated cost: ~\$$(echo "${gateway_count} * 0.05 + ${worker_count} * 1.00" | bc)/hr"
-        echo "!! Run '$0 stop' when not rendering to avoid charges."
+        echo "!! Run '$0 --region ${REGION} stop' when not rendering to avoid charges."
     else
-        echo "No Portal resources running. Safe."
+        echo "No Portal resources running in ${REGION}. Safe."
     fi
 }
 
 cmd_stop() {
-    echo "=== Stopping AWS Portal Infrastructure ==="
+    echo "=== Stopping AWS Portal Infrastructure (${REGION}) ==="
     echo ""
 
-    # 1. Cancel all Spot Fleet requests (terminates workers)
     local sfr_ids
     sfr_ids=$(aws ec2 describe-spot-fleet-requests \
         --region "$REGION" \
@@ -123,7 +164,6 @@ cmd_stop() {
 
     echo ""
 
-    # 2. Delete Portal CloudFormation stacks (terminates Gateway + VPC resources)
     local stack_names
     stack_names=$(aws cloudformation list-stacks \
         --region "$REGION" \
@@ -145,43 +185,45 @@ cmd_stop() {
     fi
 
     echo ""
-    echo "Infrastructure stop initiated."
-    echo "Run '$0 status' to verify all resources are terminated."
+    echo "Infrastructure stop initiated for ${REGION}."
+    echo "Run '$0 --region ${REGION} status' to verify all resources are terminated."
 }
 
 cmd_start() {
-    echo "=== Starting AWS Portal Infrastructure ==="
+    echo "=== Starting AWS Portal Infrastructure (${REGION}) ==="
     echo ""
-    echo "Portal infrastructure must be started from Deadline Monitor:"
+    echo "Portal infrastructure must be started from Deadline Monitor for each worker region:"
     echo "  1. Open Deadline Monitor"
-    echo "  2. View → New Panel → AWS Portal"
-    echo "  3. Right-click → Start Infrastructure"
-    echo "  4. Select region us-west-2"
+    echo "  2. Tools → Power User Mode"
+    echo "  3. View → New Panels → AWS Portal"
+    echo "  4. Right-click → Start Infrastructure"
+    echo "  5. Select region ${REGION}"
     echo ""
-    echo "Once infrastructure is running, start a Spot Fleet:"
-    echo "  5. Right-click Infrastructure → Start Spot Fleet"
-    echo "  6. Check 'Use AMI ID' → ami-0f70342f66dc80ddb"
-    echo "  7. Target Capacity: 1, Instance: g6e.4xlarge"
-    echo "  8. Pool: houdini-aws-gpu, Auto Shutdown: 15 min"
+    echo "Once infrastructure is running, start a Spot Fleet in ${REGION}:"
+    if [[ -n "$SPOT_AMI_ID" ]]; then
+        echo "  6. Check 'Use AMI ID' → ${SPOT_AMI_ID}"
+    else
+        echo "  6. Check 'Use AMI ID' → paste the worker AMI copied into ${REGION}"
+    fi
+    echo "  7. Target Capacity: ${SPOT_TARGET_CAPACITY}, Instance: ${SPOT_INSTANCE_TYPE}"
+    echo "  8. Pool: ${SPOT_POOL}, Auto Shutdown: ${SPOT_AUTO_SHUTDOWN_MINUTES} min"
     echo "  9. Launch"
     echo ""
-    echo "After first-time creation, this script can manage stop/status."
+    echo "Repeat this per region where capacity may be sourced; Deadline/RCS remains central."
 }
 
-# --- Main ---
-
-if [[ $# -lt 1 ]]; then
-    echo "Usage: $0 {status|stop|start}" >&2
+if [[ -z "$COMMAND" ]]; then
+    usage
     exit 1
 fi
 
-case "$1" in
+case "$COMMAND" in
     status) cmd_status ;;
     stop)   cmd_stop ;;
     start)  cmd_start ;;
     *)
-        echo "ERROR: Unknown command '${1}'" >&2
-        echo "Usage: $0 {status|stop|start}" >&2
+        echo "ERROR: Unknown command '${COMMAND}'" >&2
+        usage
         exit 1
         ;;
 esac

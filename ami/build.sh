@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
 # build.sh
 # Orchestrates the full AMI build by running scripts 01-06 in order.
-# Run as root on the temporary g6e.4xlarge build instance in us-west-2.
+# Run as root on the temporary GPU build instance in the selected AWS region.
 #
 # Usage:
 #   sudo bash build.sh \
 #     --repo-ip <ZEROTIER_IP_OF_DEADLINE_REPO> \
 #     --s3-bucket <YOUR_S3_BUCKET> \
 #     --houdini-build <BUILD_NUMBER> \
-#     --b2-bucket <YOUR_B2_BUCKET>
+#     --b2-bucket <YOUR_B2_BUCKET> \
+#     --aws-region <REGION> \
+#     --license-endpoint-secret-id <SECRET_ID>
 #
 # Example:
 #   sudo bash build.sh --repo-ip 10.147.20.5 --s3-bucket renderfarm-installers \
-#                      --houdini-build 506 --b2-bucket renders-allofitnow
+#                      --houdini-build 506 --b2-bucket renders-allofitnow \
+#                      --aws-region us-west-2
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts"
 LOG=/var/log/ami-build.log
@@ -23,6 +26,7 @@ S3_BUCKET=""
 HOUDINI_BUILD=""
 B2_BUCKET=""
 AWS_REGION="${AWS_REGION:-us-west-2}"
+HOUDINI_LICENSE_ENDPOINT_SECRET_ID="${HOUDINI_LICENSE_ENDPOINT_SECRET_ID:-houdini/license-endpoint-dns}"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -31,6 +35,8 @@ while [[ $# -gt 0 ]]; do
         --s3-bucket)    S3_BUCKET="$2";         shift 2 ;;
         --houdini-build) HOUDINI_BUILD="$2";    shift 2 ;;
         --b2-bucket)    B2_BUCKET="$2";          shift 2 ;;
+        --aws-region|--region) AWS_REGION="$2"; shift 2 ;;
+        --license-endpoint-secret-id) HOUDINI_LICENSE_ENDPOINT_SECRET_ID="$2"; shift 2 ;;
         *) echo "Unknown argument: $1"; shift ;;
     esac
 done
@@ -46,7 +52,7 @@ if [[ -n "$MISSING" ]]; then
     exit 1
 fi
 
-export DEADLINE_REPO_IP S3_BUCKET HOUDINI_BUILD B2_BUCKET AWS_REGION
+export DEADLINE_REPO_IP S3_BUCKET HOUDINI_BUILD B2_BUCKET AWS_REGION HOUDINI_LICENSE_ENDPOINT_SECRET_ID
 
 mkdir -p "$(dirname "$LOG")"
 echo "==> AMI build started at $(date)" | tee -a "$LOG"
@@ -99,4 +105,4 @@ run_step 06_cleanup.sh
 echo ""
 echo "==> AMI build complete at $(date)" | tee -a "$LOG"
 echo "==> Instance is ready to snapshot. Run from your workstation:"
-echo "    ./aws/create_ami.sh <INSTANCE_ID>"
+echo "    ./aws/create_ami.sh <INSTANCE_ID> --region ${AWS_REGION}"

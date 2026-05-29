@@ -7,7 +7,8 @@
 #   s3://$S3_BUCKET/installers/DeadlineClient-10.4.2.3-linux-x64-installer.run
 #
 # The worker is installed as a service but NOT started during AMI build.
-# It starts on first boot after ZeroTier is authorized and connected.
+# It starts on first boot after ZeroTier is authorized, UBL is configured for
+# the selected worker region, and network connectivity is available.
 
 S3_BUCKET="${S3_BUCKET:-CHANGE_ME}"
 DEADLINE_REPO_IP="${DEADLINE_REPO_IP:-CHANGE_ME}"   # ZeroTier IP of on-prem repo
