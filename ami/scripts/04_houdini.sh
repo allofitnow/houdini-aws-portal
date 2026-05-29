@@ -26,8 +26,9 @@ HOUDINI_LICENSE_ENDPOINT_SECRET_ID="${HOUDINI_LICENSE_ENDPOINT_SECRET_ID:-houdin
 
 LOG=/var/log/ami-build.log
 exec >> "$LOG" 2>&1
+set -euo pipefail
 
-echo "==> [04] Houdini ${HOUDINI_VERSION} install started at $(date)"
+echo "==> [04] Houdini install started at $(date)"
 
 TARBALL="houdini-${HOUDINI_VERSION}.${HOUDINI_BUILD}-linux_x86_64_gcc11.2.tar.gz"
 TMP_DIR=$(mktemp -d)
@@ -55,7 +56,7 @@ INSTALLER_DIR=$(find "$TMP_DIR" -maxdepth 1 -type d -name "houdini-*" | head -1)
 echo "source ${INSTALL_DIR}/houdini_setup" > /etc/profile.d/houdini.sh
 chmod +x /etc/profile.d/houdini.sh
 
-# Verify headless render binary
+# Verify headless render binary. houdini_setup may not exist during dry-run review — non-fatal.
 # shellcheck source=/dev/null
 source "${INSTALL_DIR}/houdini_setup" 2>/dev/null || true
 hython --version || {
@@ -67,7 +68,7 @@ hython --version || {
 # Write a boot-time service that fetches the Deadline Cloud license endpoint
 # DNS from Secrets Manager and sets HOUDINI_LICENSE_SERVER for all processes.
 #
-# The endpoint DNS is stored as: houdini/license-endpoint-dns
+# The endpoint DNS is stored as the configured HOUDINI_LICENSE_ENDPOINT_SECRET_ID.
 # Create the endpoint with:
 #   aws deadline create-license-endpoint --vpc-id <VPC> --subnet-ids <SUBNET> \
 #       --security-group-ids <SG> --region <REGION>
@@ -123,12 +124,9 @@ chmod 644 /etc/profile.d/houdini-license.sh
 
 # Persist hserver's license search list for root, ubuntu, and the system hserver user.
 install -d -m 755 /usr/lib/sesi/hserver /home/ubuntu
-printf 'serverhost=%s
-' "$LICENSE_CHAIN" > /usr/lib/sesi/hserver/.sesi_licenses.pref
-printf 'serverhost=%s
-' "$LICENSE_CHAIN" > /root/.sesi_licenses.pref
-printf 'serverhost=%s
-' "$LICENSE_CHAIN" > /home/ubuntu/.sesi_licenses.pref
+printf 'serverhost=%s\n' "$LICENSE_CHAIN" > /usr/lib/sesi/hserver/.sesi_licenses.pref
+printf 'serverhost=%s\n' "$LICENSE_CHAIN" > /root/.sesi_licenses.pref
+printf 'serverhost=%s\n' "$LICENSE_CHAIN" > /home/ubuntu/.sesi_licenses.pref
 chown ubuntu:ubuntu /home/ubuntu/.sesi_licenses.pref 2>/dev/null || true
 chmod 644 /usr/lib/sesi/hserver/.sesi_licenses.pref /root/.sesi_licenses.pref /home/ubuntu/.sesi_licenses.pref
 

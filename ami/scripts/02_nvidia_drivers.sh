@@ -5,8 +5,9 @@
 
 LOG=/var/log/ami-build.log
 exec >> "$LOG" 2>&1
+set -euo pipefail
 
-echo "==> [02] NVIDIA driver install started at $(date)"
+echo "==>"
 
 DRIVER_VERSION="535"
 
@@ -31,6 +32,7 @@ dpkg -l | grep -E "nvidia-driver-${DRIVER_VERSION}" | grep -q "^ii" || {
 }
 
 # Persistence daemon for reduced latency on first GPU call
+# May fail if already enabled or not installed — non-fatal
 systemctl enable nvidia-persistenced || true
 
 echo "==> [02] NVIDIA driver install complete — reboot required before nvidia-smi will work"

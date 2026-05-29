@@ -17,6 +17,8 @@
 #                      --houdini-build 506 --b2-bucket renders-allofitnow \
 #                      --aws-region us-west-2
 
+set -euo pipefail
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts"
 LOG=/var/log/ami-build.log
 

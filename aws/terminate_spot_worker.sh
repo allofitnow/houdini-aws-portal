@@ -1,28 +1,23 @@
 #!/usr/bin/env bash
 # terminate_spot_worker.sh
-# List or gracefully terminate manual Spot workers tagged project=deadline-worker.
+# List or gracefully terminate manual workers tagged project=deadline-worker.
 #
-# Graceful termination does best-effort cleanup before terminating EC2:
-#   - delete the Worker from Deadline via deadlinecommand -DeleteSlave
+# Cleanup is best-effort before terminating EC2:
+#   - deregister the Worker from Deadline via SSM when available
 #   - stop deadline10launcher on the instance
-#   - remove the instance ZeroTier member from the configured network
-#   - terminate the EC2 instance
-#
-# Preconditions:
-#   - AWS CLI configured for account 774538489810
-#   - For cleanup: instance has SSM online and IAM permission for ssm:SendCommand/GetCommandInvocation
-#   - For ZeroTier removal: .env has ZEROTIER_API_TOKEN or env var is exported
+#   - remove matching ZeroTier members from the configured network
+#   - terminate EC2 instances in the selected region
 
 set -euo pipefail
 
 REGION="${REGION:-${AWS_REGION:-us-west-2}}"
-TAG_FILTER="Name=tag:project,Values=deadline-worker"
-STATE_FILTER="Name=instance-state-name,Values=running,pending"
-ZT_NETWORK_ID="${ZT_NETWORK_ID:-d3ecf5726d14ac76}"
+TAG_PROJECT="${TAG_PROJECT:-deadline-worker}"
+ZT_NETWORK="${ZT_NETWORK:-${ZT_NETWORK_ID:-d3ecf5726d14ac76}}"
+ZT_TOKEN="${ZEROTIER_API_TOKEN:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/../.env"
 COMMAND=""
-INSTANCE_ID=""
+INSTANCE_IDS=()
 
 if [[ -f "$ENV_FILE" ]]; then
     # shellcheck source=/dev/null
@@ -31,7 +26,7 @@ fi
 
 usage() {
     cat >&2 <<USAGE
-Usage: $0 [--region REGION] --list | --all | <instance-id>
+Usage: $0 [--region REGION] --list | --all | <instance-id> [<instance-id> ...]
 USAGE
 }
 
@@ -39,125 +34,134 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --region|--aws-region) REGION="$2"; shift 2 ;;
         --list|--all) COMMAND="$1"; shift ;;
-        i-*) COMMAND="instance"; INSTANCE_ID="$1"; shift ;;
+        i-*) COMMAND="instances"; INSTANCE_IDS+=("$1"); shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "ERROR: Unknown argument '$1'" >&2; usage; exit 1 ;;
     esac
 done
 
 list_workers() {
+    echo "==> Running/stopped deadline-worker instances in ${REGION}:"
     aws ec2 describe-instances \
+        --filters "Name=tag:project,Values=$TAG_PROJECT" \
+                  "Name=instance-state-name,Values=pending,running,stopping,stopped" \
         --region "$REGION" \
-        --filters "$TAG_FILTER" "$STATE_FILTER" \
-        --query "Reservations[].Instances[].[InstanceId,State.Name,InstanceType,LaunchTime,Tags[?Key=='Name']|[0].Value]" \
-        --output table
+        --query "Reservations[].Instances[].{ID:InstanceId,State:State.Name,IP:PublicIpAddress,LaunchTime:LaunchTime}" \
+        --output table 2>/dev/null || echo "    No workers found."
 }
 
-ssm_run_cleanup() {
-    local id="$1"
-    local command_id status output worker_name zt_node_id
+remove_zerotier_members_for_ip() {
+    local instance_ip="$1"
+    local members node_ids node_id
 
-    echo "Running Deadline/ZeroTier pre-termination cleanup on ${id} via SSM in ${REGION}..."
+    if [[ -z "$ZT_TOKEN" || -z "$instance_ip" || "$instance_ip" == "None" ]]; then
+        return 0
+    fi
+
+    members=$(curl -sf -H "Authorization: token $ZT_TOKEN" \
+        "https://my.zerotier.com/api/v1/network/$ZT_NETWORK/member" 2>/dev/null || echo "[]")
+
+    node_ids=$(jq -r \
+        ".[] | select(.physicalAddress | startswith(\"$instance_ip\")) | .nodeId" \
+        <<< "$members" 2>/dev/null || true)
+
+    for node_id in $node_ids; do
+        echo "    ZeroTier: deleting node $node_id (public IP: $instance_ip)"
+        curl -sf -X DELETE \
+            -H "Authorization: token $ZT_TOKEN" \
+            "https://my.zerotier.com/api/v1/network/$ZT_NETWORK/member/$node_id" \
+            >/dev/null 2>&1 || echo "    WARNING: ZeroTier delete failed for $node_id" >&2
+    done
+}
+
+deregister_deadline_worker() {
+    local instance_id="$1"
+    local ssm_status dereg_cmd cmd_id output
+
+    ssm_status=$(aws ssm describe-instance-information \
+        --filters "Key=InstanceIds,Values=$instance_id" \
+        --region "$REGION" \
+        --query 'InstanceInformationList[0].PingStatus' \
+        --output text 2>/dev/null || echo "Offline")
+
+    if [[ "$ssm_status" != "Online" ]]; then
+        echo "    WARNING: SSM ${ssm_status} for ${instance_id}; skipping Deadline deregistration" >&2
+        return 0
+    fi
 
     # shellcheck disable=SC2016
-    command_id=$(aws ssm send-command \
+    dereg_cmd=$(printf '%s' 'export PATH="/opt/hfs21.0/bin:/opt/Thinkbox/Deadline10/bin:$PATH"; deadlinecommand -removeWorker 2>&1 || deadlinecommand -DeleteSlave $(hostname) 2>&1 || true; systemctl stop deadline10launcher 2>/dev/null || true' | base64 -w0)
+    cmd_id=$(aws ssm send-command \
+        --instance-ids "$instance_id" \
+        --document-name "AWS-RunShellScript" \
+        --parameters "commands=[\"echo $dereg_cmd | base64 -d | bash\"]" \
+        --timeout-seconds 30 \
         --region "$REGION" \
-        --instance-ids "$id" \
-        --document-name AWS-RunShellScript \
-        --parameters 'commands=["WORKER_NAME=$(hostname)","ZT_NODE_ID=$(sudo zerotier-cli info 2>/dev/null | cut -d'"'"' '"'"' -f3 || true)","echo DEADLINE_WORKER_NAME=${WORKER_NAME}","echo ZEROTIER_NODE_ID=${ZT_NODE_ID}","if [ -x /opt/Thinkbox/Deadline10/bin/deadlinecommand ]; then /opt/Thinkbox/Deadline10/bin/deadlinecommand -DeleteSlave ${WORKER_NAME} || true; fi","sudo systemctl stop deadline10launcher || true"]' \
-        --query Command.CommandId \
+        --query 'Command.CommandId' \
         --output text 2>/dev/null || true)
 
-    if [[ -z "${command_id:-}" || "$command_id" == "None" ]]; then
-        echo "WARNING: Could not start SSM cleanup for ${id}; continuing with EC2 termination." >&2
+    if [[ -z "$cmd_id" || "$cmd_id" == "None" ]]; then
+        echo "    WARNING: Could not send deregister command to ${instance_id}" >&2
         return 0
     fi
 
-    for _ in {1..30}; do
-        status=$(aws ssm get-command-invocation \
-            --region "$REGION" \
-            --command-id "$command_id" \
-            --instance-id "$id" \
-            --query Status \
-            --output text 2>/dev/null || true)
-        case "$status" in
-            Success|Cancelled|TimedOut|Failed|Cancelling) break ;;
-        esac
-        sleep 2
+    sleep 8
+    output=$(aws ssm get-command-invocation \
+        --command-id "$cmd_id" \
+        --instance-id "$instance_id" \
+        --region "$REGION" \
+        --query 'StandardOutputContent' \
+        --output text 2>/dev/null || true)
+    printf '%s\n' "$output" | sed 's/^/    Deadline: /'
+}
+
+terminate_instances() {
+    local ids=("$@")
+    local instance_ips
+
+    if [[ ${#ids[@]} -eq 0 ]]; then
+        echo "No workers to terminate."
+        return 0
+    fi
+
+    echo "==> Deregistering workers from Deadline in ${REGION}..."
+    for id in "${ids[@]}"; do
+        deregister_deadline_worker "$id"
     done
 
-    output=$(aws ssm get-command-invocation \
+    instance_ips=$(aws ec2 describe-instances \
+        --instance-ids "${ids[@]}" \
         --region "$REGION" \
-        --command-id "$command_id" \
-        --instance-id "$id" \
-        --query StandardOutputContent \
+        --query "Reservations[].Instances[].PublicIpAddress" \
         --output text 2>/dev/null || true)
 
-    echo "$output"
-
-    worker_name=$(awk -F= '/^DEADLINE_WORKER_NAME=/{print $2; exit}' <<< "$output")
-    zt_node_id=$(awk -F= '/^ZEROTIER_NODE_ID=/{print $2; exit}' <<< "$output")
-
-    if [[ -n "${worker_name:-}" ]]; then
-        echo "Deadline worker cleanup requested for: ${worker_name}"
-    fi
-
-    if [[ -n "${zt_node_id:-}" && "$zt_node_id" != "None" ]]; then
-        remove_zerotier_member "$zt_node_id"
-    else
-        echo "WARNING: Could not determine ZeroTier node ID for ${id}; skipping ZeroTier removal." >&2
-    fi
-}
-
-remove_zerotier_member() {
-    local node_id="$1"
-
-    if [[ -z "${ZEROTIER_API_TOKEN:-}" ]]; then
-        echo "WARNING: ZEROTIER_API_TOKEN not set; skipping ZeroTier member removal for ${node_id}." >&2
-        return 0
-    fi
-
-    echo "Removing ZeroTier member ${node_id} from network ${ZT_NETWORK_ID}..."
-    curl -fsS -X DELETE \
-        -H "Authorization: token ${ZEROTIER_API_TOKEN}" \
-        "https://api.zerotier.com/api/v1/network/${ZT_NETWORK_ID}/member/${node_id}" \
-        >/dev/null || echo "WARNING: ZeroTier member removal failed for ${node_id}." >&2
-}
-
-terminate_one() {
-    local id="$1"
-
-    ssm_run_cleanup "$id"
-
+    echo ""
+    echo "==> Terminating instances in ${REGION}: ${ids[*]}"
     aws ec2 terminate-instances \
+        --instance-ids "${ids[@]}" \
         --region "$REGION" \
-        --instance-ids "$id" \
-        --query "TerminatingInstances[0].[InstanceId,CurrentState.Name]" \
         --output table
-    echo "Terminated: ${id}"
+
+    if [[ -n "$instance_ips" && "$instance_ips" != "None" ]]; then
+        echo ""
+        echo "==> ZeroTier cleanup:"
+        for ip in $instance_ips; do
+            remove_zerotier_members_for_ip "$ip"
+        done
+    fi
 }
 
 terminate_all() {
-    mapfile -t ids < <(aws ec2 describe-instances \
+    local ids_text ids=()
+    ids_text=$(aws ec2 describe-instances \
+        --filters "Name=tag:project,Values=$TAG_PROJECT" \
+                  "Name=instance-state-name,Values=pending,running,stopping,stopped" \
         --region "$REGION" \
-        --filters "$TAG_FILTER" "$STATE_FILTER" \
         --query "Reservations[].Instances[].InstanceId" \
-        --output text)
+        --output text 2>/dev/null || true)
 
-    local clean_ids=()
-    for id in "${ids[@]}"; do
-        [[ -n "$id" && "$id" != "None" ]] && clean_ids+=("$id")
-    done
-
-    if [[ ${#clean_ids[@]} -eq 0 ]]; then
-        echo "No running deadline-worker instances found in ${REGION}."
-        return
-    fi
-
-    echo "Gracefully terminating ${#clean_ids[@]} instance(s) in ${REGION}: ${clean_ids[*]}"
-    for id in "${clean_ids[@]}"; do
-        terminate_one "$id"
-    done
+    read -r -a ids <<< "$ids_text"
+    terminate_instances "${ids[@]}"
 }
 
 if [[ -z "$COMMAND" ]]; then
@@ -167,11 +171,7 @@ fi
 
 case "$COMMAND" in
     --list) list_workers ;;
-    --all)  terminate_all ;;
-    instance) terminate_one "$INSTANCE_ID" ;;
-    *)
-        echo "ERROR: Unknown command '${COMMAND}'" >&2
-        usage
-        exit 1
-        ;;
+    --all) terminate_all ;;
+    instances) terminate_instances "${INSTANCE_IDS[@]}" ;;
+    *) echo "ERROR: Unknown command '${COMMAND}'" >&2; usage; exit 1 ;;
 esac

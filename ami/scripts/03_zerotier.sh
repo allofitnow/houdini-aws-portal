@@ -7,6 +7,7 @@
 
 LOG=/var/log/ami-build.log
 exec >> "$LOG" 2>&1
+set -euo pipefail
 
 ZT_NETWORK="d3ecf5726d14ac76"
 

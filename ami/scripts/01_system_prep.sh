@@ -5,8 +5,9 @@
 
 LOG=/var/log/ami-build.log
 exec >> "$LOG" 2>&1
+set -euo pipefail
 
-echo "==> [01] System prep started at $(date)"
+echo "==>"
 
 export DEBIAN_FRONTEND=noninteractive
 
