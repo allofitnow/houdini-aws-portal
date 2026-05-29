@@ -8,6 +8,10 @@ Once GitHub creates `allofitnow/houdini-aws-portal.wiki.git`, push the prepared 
 git -C /tmp/houdini-aws-portal-wiki push github master
 ```
 
+## Worker access
+
+- [Worker operator access: SSH shell and Amazon DCV GUI](AWS-Portal-RCS-and-Deadline-Cloud-UBL-Recovery.md#19-worker-operator-access-ssh-shell-and-amazon-dcv-gui)
+
 ## Pages
 
 - [AMI Build](AMI-Build.md)

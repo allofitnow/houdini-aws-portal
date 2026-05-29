@@ -709,3 +709,55 @@ latest validation job Completed with ErrorReports=0 and FailedChunks=0
 ```
 
 Important nuance: `deadline10worker` may report `inactive` even when `deadlineworker.exe -nogui` is running under `deadlinelauncher.exe`. In this setup, the process list and `deadlinecommand -GetSlave ip-10-128-51-50` are the source of truth. If no `deadlineworker.exe` process exists and allowlisted jobs remain queued, start it manually or restart the launcher.
+## 19. Worker operator access: SSH shell and Amazon DCV GUI
+Use two different access paths depending on what you need to do on a worker.
+
+### Shell access with SSH
+Use SSH when you need logs, process checks, direct command-line validation, or file inspection. Manual fallback workers launched by `aws/launch_ready_spot_worker.sh` inject the launch host's public SSH keys into the `ubuntu` account.
+
+1. Find the worker's ZeroTier IP from the ZeroTier dashboard or from worker validation output.
+2. Connect as the `ubuntu` user:
+
+```bash
+ssh ubuntu@<zerotier-ip-of-worker>
+```
+
+If you launched through the minimal legacy script, make sure the worker has your SSH key and that the ZeroTier node is authorized before trying to connect.
+
+### Screen/GUI access with Amazon DCV client
+Use Amazon DCV when you need an interactive desktop session, GUI tools, or visual inspection. DCV is optional and is installed by the helper scripts only when desktop provisioning is requested.
+
+For ready-worker launches, enable desktop provisioning before launch:
+
+```bash
+INSTALL_DESKTOP=true ./aws/launch_ready_spot_worker.sh
+```
+
+The desktop helper installs GNOME and Amazon DCV, starts a DCV session for `ubuntu`, and prints the connection details. Defaults from `aws/setup_desktop.sh`:
+
+```text
+Protocol: https
+Port: 8443
+User: ubuntu
+Password: value of DCV_PASSWORD, or the script default if not overridden
+```
+
+Recommended usage:
+
+1. Install the Amazon DCV client on your workstation.
+2. Launch/provision the worker with `INSTALL_DESKTOP=true`.
+3. Authorize the worker's ZeroTier node if it is not already authorized.
+4. Connect the DCV client to:
+
+```text
+<zerotier-ip-of-worker>:8443
+```
+
+5. Log in as `ubuntu` with `DCV_PASSWORD`. Set `DCV_PASSWORD` explicitly before provisioning when you do not want the script default.
+
+Security notes:
+
+- Prefer connecting to the worker's ZeroTier IP, not a public IP.
+- Do not open DCV broadly to the internet. If a security group rule is needed, restrict TCP `8443` to trusted admin source IPs or overlay-network paths.
+- Treat DCV as temporary operator access; disable or terminate the worker when finished.
+

@@ -66,4 +66,9 @@ Key design decisions:
 Source mirror: [https://github.com/allofitnow/houdini-aws-portal](https://github.com/allofitnow/houdini-aws-portal)
 
 This wiki is mirrored from the GitLab project wiki for GitHub visibility.
+## Worker access quick reference
+
+- SSH shell: connect as `ubuntu` to the worker ZeroTier IP, for example `ssh ubuntu@<zerotier-ip-of-worker>`.
+- GUI/screen access: launch/provision with `INSTALL_DESKTOP=true`, then connect using the Amazon DCV client to `<zerotier-ip-of-worker>:8443` as user `ubuntu`.
+- Full details: [DCV GUI + SSH worker access](AWS-Portal-RCS-and-Deadline-Cloud-UBL-Recovery.md#19-worker-operator-access-ssh-shell-and-amazon-dcv-gui).
 
