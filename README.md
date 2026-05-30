@@ -42,6 +42,7 @@ aws/
   launch_build_instance.sh      Launch a temporary GPU build instance
   create_ami.sh                 Stop the instance and create a region-local AMI
   portal_infra.sh               Status/stop guidance for per-region Portal stacks
+  cleanup_all_infrastructure.sh Single cleanup entrypoint for all worker infrastructure
   launch_ready_spot_worker.sh   Manual multi-region Spot fallback launcher
   launch_spot_worker.sh         Minimal legacy single-region manual launcher
   terminate_spot_worker.sh      Terminate manual workers in the selected region
@@ -99,11 +100,15 @@ Copy the resulting AMI to every additional worker region or rebuild it there.
 
 See `deadline/aws_portal_notes.md` for the full operator workflow. The short version is:
 
-1. In Deadline Monitor, enable Tools → Power User Mode.
-2. Open View → New Panels → AWS Portal.
-3. Start Portal infrastructure once per worker region.
-4. In each region, start a Spot Fleet using the AMI copied into that same region.
-5. Keep the Deadline Repository/RCS central; only Portal infrastructure, AMI IDs, UBL endpoints, subnets, and security groups are regional.
+1. Confirm the target region is clean with `./aws/portal_infra.sh --region <REGION> status`. Do not start new infrastructure over `DELETE_FAILED` Portal stacks, stale Gateway instances, or stale Deadline Cloud VPC endpoints.
+2. In Deadline Monitor, enable Tools → Power User Mode.
+3. Open View → New Panels → AWS Portal.
+4. Start Portal infrastructure once per worker region.
+5. Treat success as CloudFormation `CREATE_COMPLETE` plus a running regional Gateway; AWS Portal may not show a final success popup.
+6. Create or refresh the regional Deadline Cloud UBL endpoint for the new Portal VPC:
+   `./aws/create_ubl_endpoint.sh --region <REGION> --yes`
+7. In each region, start a Spot Fleet using the AMI copied into that same region.
+8. Keep the Deadline Repository/RCS central; only Portal infrastructure, AMI IDs, UBL endpoints, subnets, and security groups are regional.
 
 ## Manual multi-region fallback workers
 
@@ -119,6 +124,32 @@ HOUDINI_LICENSE_ENDPOINT_SECRET_ID_US_EAST_1=houdini/license-endpoint-dns \
 ```
 
 By default the launcher requires explicit network config and a usable regional UBL secret before attempting a launch.
+
+## Stop and remove all worker infrastructure
+
+Use one explicit cleanup command when rendering is done and all AWS worker infrastructure should be removed:
+
+```bash
+./aws/cleanup_all_infrastructure.sh --yes --regions us-west-2,us-east-1,eu-west-1
+```
+
+For a safe preview, omit `--yes` or pass `--dry-run`:
+
+```bash
+./aws/cleanup_all_infrastructure.sh --dry-run --regions us-west-2,us-east-1
+```
+
+The cleanup command runs the existing per-region helpers in order:
+
+1. Terminates manual fallback workers tagged `project=deadline-worker` with `aws/terminate_spot_worker.sh --all`.
+2. Cancels AWS Portal Spot Fleet requests with `--terminate-instances`.
+3. Deletes Deadline Cloud license endpoints and orphan non-CloudFormation VPC endpoints in Portal-created VPCs so subnets/security groups can be removed.
+4. Disables API termination protection on Portal Gateway instances in Portal-created VPCs before retrying stack deletion.
+5. Empties versioned Portal S3 client/logging buckets so CloudFormation can delete them.
+6. Deletes or retries AWS Portal CloudFormation stacks, including Gateway/VPC resources and stacks already in `DELETE_FAILED`.
+7. Prints post-cleanup Portal status unless `--no-status` is passed.
+
+Regions come from `--regions`, `CLEANUP_REGIONS`, `READY_WORKER_REGIONS`, `REGION`/`AWS_REGION`, then `us-west-2` as the final default.
 
 ## GitLab issues
 

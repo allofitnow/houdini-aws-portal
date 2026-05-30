@@ -68,6 +68,14 @@ The AWS Portal Server (Link + Asset Server) is installed on the Windows Deadline
 
 ## First-time setup per region through Deadline Monitor
 
+Before starting a new infrastructure, confirm the region is clean:
+
+```bash
+./aws/portal_infra.sh --region us-west-2 status
+```
+
+A clean region has no running Gateway or Portal worker instances, no active Spot Fleet requests, no Portal stacks in `CREATE_COMPLETE` or `DELETE_FAILED`, and no Deadline Cloud license endpoint VPC endpoints attached to the old Portal VPC. If cleanup previously left `DELETE_FAILED` stacks, run the destructive cleanup entrypoint again only when it is safe to remove the old Portal VPC and regional Deadline Cloud license endpoint resources.
+
 1. Start RCS on the Windows machine.
 2. Open Deadline Monitor.
 3. Enable Tools → Power User Mode.
@@ -75,17 +83,26 @@ The AWS Portal Server (Link + Asset Server) is installed on the Windows Deadline
 5. Log in with the AWSPortal IAM credentials.
 6. Right-click in the AWS Portal panel → Start Infrastructure.
 7. Select the worker region, for example `us-west-2`, `us-east-1`, or `eu-west-1`.
-8. After the regional Gateway is running, right-click Infrastructure → Start Spot Fleet:
+8. Wait for infrastructure success using verification signals rather than expecting a final popup:
+   - AWS Portal panel shows the regional Infrastructure/Gateway entry as running.
+   - CloudFormation parent Portal stack reaches `CREATE_COMPLETE`.
+   - EC2 has one `Name=Gateway` instance running in the selected region.
+   - `./aws/portal_infra.sh --region <REGION> status` shows the Gateway and no `DELETE_FAILED` stacks.
+9. Create or refresh the regional Deadline Cloud UBL endpoint before starting Houdini workers:
+   - Preview: `./aws/create_ubl_endpoint.sh --region <REGION> --dry-run`
+   - Apply: `./aws/create_ubl_endpoint.sh --region <REGION> --yes`
+   - The script discovers the active Portal stack, creates/reuses the Deadline Cloud license endpoint, attaches SideFX metered products, opens worker SG self-ingress on TCP `1715-1717`, and writes the endpoint DNS to Secrets Manager.
+10. After the regional Gateway and UBL endpoint are ready, right-click the completed Infrastructure row → Start Spot Fleet:
    - Check Use AMI ID and paste the AMI ID copied into that same region.
    - Target Capacity: 1 for testing.
    - Instance Type: choose the available GPU type in that region.
    - Pool: `houdini-aws-gpu`.
    - Auto Shutdown: 15 minutes idle.
    - Launch.
-9. Repeat for each region that may provide capacity.
-10. Worker appears in Deadline Monitor within a few minutes.
+11. Repeat for each region that may provide capacity.
+12. Worker appears in Deadline Monitor within a few minutes.
 
-After first-time setup, use `aws/portal_infra.sh --region <REGION> status` and `aws/portal_infra.sh --region <REGION> stop` to inspect or stop regional Portal resources from the CLI. Starting infrastructure still happens through Deadline Monitor.
+After first-time setup, use `aws/portal_infra.sh --region <REGION> status` and `aws/portal_infra.sh --region <REGION> stop` to inspect or stop regional Portal resources from the CLI. Starting infrastructure still happens through Deadline Monitor. If a local file-read popup appears during Portal setup, treat it as a certificate path/access problem first: do not point Portal/scripts at `C:\DeadlineDatabase10\certs`; copy the certs to a user-readable `.deadline` or AppData folder and keep the Portal UBL sync directory separate.
 
 ## Asset Server root directories
 
@@ -145,6 +162,36 @@ Terminate manual fallback workers in the selected region:
 ```
 
 Manual CLI workers use ZeroTier for repo connectivity and rclone/B2 for render output. They are not managed by AWS Portal.
+
+## One-command cleanup for all worker infrastructure
+
+When rendering is finished and the goal is to remove all project AWS worker infrastructure, use:
+
+```bash
+./aws/cleanup_all_infrastructure.sh --yes --regions us-west-2,us-east-1,eu-west-1
+```
+
+This is intentionally explicit and destructive. Without `--yes`, the script is a dry-run and only prints what it would execute:
+
+```bash
+./aws/cleanup_all_infrastructure.sh --dry-run --regions us-west-2,us-east-1
+```
+
+For each selected region, the cleanup command:
+
+1. Runs `aws/terminate_spot_worker.sh --region <REGION> --all` to deregister/terminate manual fallback workers tagged `project=deadline-worker`.
+2. Runs `aws/portal_infra.sh --region <REGION> stop` to cancel active/submitted Portal Spot Fleets with instance termination.
+3. Deletes Deadline Cloud license endpoints and orphan non-CloudFormation VPC endpoints inside Portal-created VPCs, because those endpoints block subnet and security-group deletion. Set `CLEANUP_DEADLINE_LICENSE_ENDPOINTS=false` only if intentionally preserving a regional license endpoint.
+4. Disables EC2 API termination protection on Portal Gateway instances in Portal-created VPCs before retrying CloudFormation deletion.
+5. Empties versioned Portal S3 client/logging buckets before retrying stack deletion, because non-empty versioned buckets block CloudFormation deletion.
+6. Deletes or retries AWS Portal CloudFormation stacks discovered by the Portal stack naming convention, including stacks already in `DELETE_FAILED`.
+7. Runs `aws/portal_infra.sh --region <REGION> status` afterward unless `--no-status` is passed.
+
+Use `CLEANUP_REGIONS` or `READY_WORKER_REGIONS` for the normal multi-region list so the command can stay short:
+
+```bash
+CLEANUP_REGIONS=us-west-2,us-east-1 ./aws/cleanup_all_infrastructure.sh --yes
+```
 
 ## Cost reminder
 

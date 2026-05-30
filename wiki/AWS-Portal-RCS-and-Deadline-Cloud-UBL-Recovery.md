@@ -126,10 +126,13 @@ Important lessons from recovery:
 
 - Do not reuse stale VPCs, stale VPC endpoints, stale S3 buckets, or stale AWS Portal infrastructure entries.
 - AWS Portal can show old `DELETE_COMPLETE` infrastructure entries; the active `CREATE_COMPLETE` CloudFormation stack is what matters.
+- A final success popup is not required. Treat creation as successful only when the AWS Portal panel shows the Gateway/Infrastructure entry as running, the active CloudFormation parent stack is `CREATE_COMPLETE`, and an EC2 `Name=Gateway` instance is running in the selected region.
+- If AWS Portal shows a local file-read popup, check certificate access first. Do not point Portal, WSL scripts, or worker launch tooling directly at `C:\DeadlineDatabase10\certs`; copy the certs to the user-readable `.deadline` or AppData locations from section 2 and keep the Portal UBL sync directory separate.
+- Before a fresh Start Infrastructure test, `./aws/portal_infra.sh --region us-west-2 status` should show no running Gateway, no Portal workers, no active Spot Fleet requests, no Portal stacks in `DELETE_FAILED`, and no stale Deadline Cloud license endpoint VPC endpoints attached to the old Portal VPC.
 - After rebuilding Portal infrastructure, rediscover the current stack resources and update any local `.env` values and scripts that reference subnets or worker security groups.
 - The AWS Asset Server became healthy only after current infrastructure and Portal Link settings were corrected.
 
-Current resources from the validated stack:
+Current resources from the last validated stack are not reusable after cleanup and must be rediscovered after the next successful Start Infrastructure run:
 
 - `ReverseDashVPC` → `vpc-08477ae9dd456d2e0`
 - `PublicSubnet` → `subnet-019a4948de8c68510`
@@ -145,14 +148,21 @@ vpce-* State=pendingAcceptance
 ServiceName=com.amazonaws.vpce.us-west-2.vpce-svc-0c4b155bc5b761304
 ```
 
-Use the Deadline Cloud API instead:
+Use the project helper, which calls the Deadline Cloud API and discovers the current Portal stack resources:
+
+```bash
+./aws/create_ubl_endpoint.sh --region us-west-2 --dry-run
+./aws/create_ubl_endpoint.sh --region us-west-2 --yes
+```
+
+The helper creates or reuses the endpoint with the equivalent Deadline Cloud API call:
 
 ```bash
 aws deadline create-license-endpoint \
   --region us-west-2 \
-  --vpc-id vpc-08477ae9dd456d2e0 \
-  --subnet-ids subnet-019a4948de8c68510 \
-  --security-group-ids sg-09335256539b1c0f0
+  --vpc-id <CURRENT_PORTAL_VPC> \
+  --subnet-ids <CURRENT_PORTAL_PUBLIC_SUBNET> \
+  --security-group-ids <CURRENT_REVERSE_SLAVE_SG>
 ```
 
 Inspect it with:
@@ -160,31 +170,37 @@ Inspect it with:
 ```bash
 aws deadline get-license-endpoint \
   --region us-west-2 \
-  --license-endpoint-id le-f041d594eefc4506ad52c3d730c39417
+  --license-endpoint-id <LICENSE_ENDPOINT_ID>
 ```
 
 ## 6. Attach required SideFX metered products
-Attach all SideFX products used by the Houdini/Karma render path:
+Attach all SideFX products used by the Houdini/Karma render path. The helper does this automatically for `houdini-21.0`, `karma-21.0`, and `mantra-21.0`:
+
+```bash
+./aws/create_ubl_endpoint.sh --region us-west-2 --yes
+```
+
+Manual equivalent:
 
 ```bash
 aws deadline put-metered-product \
   --region us-west-2 \
-  --license-endpoint-id le-f041d594eefc4506ad52c3d730c39417 \
+  --license-endpoint-id <LICENSE_ENDPOINT_ID> \
   --product-id houdini-21.0
 
 aws deadline put-metered-product \
   --region us-west-2 \
-  --license-endpoint-id le-f041d594eefc4506ad52c3d730c39417 \
+  --license-endpoint-id <LICENSE_ENDPOINT_ID> \
   --product-id karma-21.0
 
 aws deadline put-metered-product \
   --region us-west-2 \
-  --license-endpoint-id le-f041d594eefc4506ad52c3d730c39417 \
+  --license-endpoint-id <LICENSE_ENDPOINT_ID> \
   --product-id mantra-21.0
 
 aws deadline list-metered-products \
   --region us-west-2 \
-  --license-endpoint-id le-f041d594eefc4506ad52c3d730c39417
+  --license-endpoint-id <LICENSE_ENDPOINT_ID>
 ```
 
 Expected product ports:
@@ -201,13 +217,17 @@ Required inbound rule on `ReverseSlaveSG`:
 - TCP `1715-1717`
 - Source: same security group (`ReverseSlaveSG`)
 
+`./aws/create_ubl_endpoint.sh --region us-west-2 --yes` authorizes this rule automatically.
+
+Manual equivalent:
+
 ```bash
 aws ec2 authorize-security-group-ingress \
   --region us-west-2 \
-  --group-id sg-09335256539b1c0f0 \
+  --group-id <CURRENT_REVERSE_SLAVE_SG> \
   --protocol tcp \
   --port 1715-1717 \
-  --source-group sg-09335256539b1c0f0
+  --source-group <CURRENT_REVERSE_SLAVE_SG>
 ```
 
 Worker-side validation:
@@ -227,13 +247,15 @@ Secret ID:
 houdini/license-endpoint-dns
 ```
 
-Value should be the endpoint DNS without a port:
+Value should be the endpoint DNS without a port. `./aws/create_ubl_endpoint.sh --region us-west-2 --yes` writes this secret automatically after the endpoint reaches `READY`.
+
+Manual equivalent:
 
 ```bash
 aws secretsmanager put-secret-value \
   --region us-west-2 \
   --secret-id houdini/license-endpoint-dns \
-  --secret-string vpce-0508f24c517312706-44r8vcfr.vpce-svc-0c4b155bc5b761304.us-west-2.vpce.amazonaws.com
+  --secret-string <LICENSE_ENDPOINT_DNS>
 ```
 
 ## 9. Configure worker IAM permissions
@@ -760,4 +782,34 @@ Security notes:
 - Prefer connecting to the worker's ZeroTier IP, not a public IP.
 - Do not open DCV broadly to the internet. If a security group rule is needed, restrict TCP `8443` to trusted admin source IPs or overlay-network paths.
 - Treat DCV as temporary operator access; disable or terminate the worker when finished.
+## 20. One-command cleanup for all worker infrastructure
+Use one explicit command when all AWS Portal/manual worker infrastructure should be stopped and removed:
+
+```bash
+./aws/cleanup_all_infrastructure.sh --yes --regions us-west-2,us-east-1,eu-west-1
+```
+
+Run a non-destructive preview first:
+
+```bash
+./aws/cleanup_all_infrastructure.sh --dry-run --regions us-west-2,us-east-1
+```
+
+For each region, the command cleans up in this order:
+
+1. Manual fallback workers tagged `project=deadline-worker`, including best-effort Deadline deregistration and ZeroTier member cleanup through `aws/terminate_spot_worker.sh --all`.
+2. AWS Portal Spot Fleet requests, cancelled with instance termination.
+3. Deadline Cloud license endpoints and orphan non-CloudFormation VPC endpoints inside Portal-created VPCs. These endpoints otherwise leave ENIs that block private subnet and security-group deletion. Set `CLEANUP_DEADLINE_LICENSE_ENDPOINTS=false` only when intentionally preserving a regional license endpoint.
+4. EC2 API termination protection on Portal Gateway instances inside Portal-created VPCs. This must be disabled before CloudFormation can delete the Gateway.
+5. Versioned Portal S3 client/logging buckets. These must be emptied before CloudFormation can delete them.
+6. AWS Portal CloudFormation stacks, including stacks already in `DELETE_FAILED`.
+7. Post-cleanup Portal status, unless `--no-status` is used.
+
+The region list is resolved from `--regions`, `CLEANUP_REGIONS`, `READY_WORKER_REGIONS`, `REGION`/`AWS_REGION`, then `us-west-2`.
+
+Known cleanup failure patterns from recovery:
+
+- If the parent stack fails on `ReverseForwarder`, check the Gateway instance for `disableApiTermination=true`; disable termination protection and retry stack deletion.
+- If child stacks fail on `PrivateSubnet` and the parent `ReverseSlaveSG` has dependent objects, check for Deadline Cloud or manually created VPC endpoint ENIs in the Portal VPC and remove the corresponding license endpoints/orphan VPC endpoints before retrying stack deletion.
+- If the parent stack fails on `ClientBucket`, the Portal client bucket is versioned and not empty. Delete all object versions and delete markers from the Portal client/logging buckets, then retry stack deletion.
 
