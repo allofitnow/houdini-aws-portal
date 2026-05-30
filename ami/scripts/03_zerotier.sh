@@ -13,8 +13,12 @@ ZT_NETWORK="d3ecf5726d14ac76"
 
 echo "==> [03] ZeroTier install started at $(date)"
 
-# Install ZeroTier via official script
-curl -s https://install.zerotier.com | bash
+# Install ZeroTier via official script (skip if already installed)
+if command -v zerotier-cli &>/dev/null; then
+    echo "==> [03] ZeroTier already installed, skipping install"
+else
+    curl -s https://install.zerotier.com | bash
+fi
 
 systemctl enable zerotier-one
 systemctl start zerotier-one
@@ -22,8 +26,12 @@ systemctl start zerotier-one
 # Wait for daemon to be ready
 sleep 5
 
-# Join the render farm network
-zerotier-cli join "$ZT_NETWORK"
+# Join the render farm network (skip if already a member)
+if zerotier-cli listnetworks | grep -q "$ZT_NETWORK"; then
+    echo "==> [03] Already joined network $ZT_NETWORK"
+else
+    zerotier-cli join "$ZT_NETWORK"
+fi
 
 NODE_ID=$(zerotier-cli info | awk '{print $3}')
 

@@ -40,11 +40,10 @@ aws s3 cp "s3://${S3_BUCKET}/installers/${TARBALL}" "${TMP_DIR}/${TARBALL}" \
 tar -xzf "${TMP_DIR}/${TARBALL}" -C "$TMP_DIR"
 INSTALLER_DIR=$(find "$TMP_DIR" -maxdepth 1 -type d -name "houdini-*" | head -1)
 
-# Silent install: engine only (no GUI, no desktop launcher)
+# Silent install: headless render (no GUI, no desktop launcher, no license server)
 "${INSTALLER_DIR}/houdini.install" \
     --accept-EULA 2021-10-13 \
     --install-houdini \
-    --install-houdini-engine \
     --no-install-license \
     --no-install-hqueue-client \
     --no-install-hqueue-server \

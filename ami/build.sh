@@ -76,16 +76,19 @@ run_step() {
 
 run_step 01_system_prep.sh
 
-echo ""
-echo "==> Rebooting to activate Nouveau blacklist before NVIDIA driver install..."
-echo "==> Re-run this script after reboot to continue from step 02."
-echo "==> (The script detects completion of step 01 via /var/log/ami-build.log)"
-echo ""
-
-# If NVIDIA driver is already installed, skip the reboot gate
-if dpkg -l | grep -q "^ii.*nvidia-driver"; then
-    echo "==> NVIDIA driver already installed, continuing..."
-else
+# Reboot gate: only needed once, to activate Nouveau blacklist.
+# If nouveau is still loaded OR blacklist file doesn't exist yet, reboot.
+# On second run, nouveau is gone and we proceed to step 02.
+BLACKLIST_FILE="/etc/modprobe.d/blacklist-nouveau.conf"
+if ! modprobe -n nouveau 2>/dev/null || [[ ! -f "$BLACKLIST_FILE" ]]; then
+    echo ""
+    echo "==> Nouveau blacklist active, proceeding to NVIDIA driver install..."
+elif lsmod | grep -q nouveau; then
+    echo ""
+    echo "==> Rebooting to activate Nouveau blacklist before NVIDIA driver install..."
+    echo "==> Re-run this script after reboot to continue from step 02."
+    echo "==> (The script detects completion of step 01 via /var/log/ami-build.log)"
+    echo ""
     echo "==> First run complete. Reboot and re-run build.sh to continue."
     exit 0
 fi
@@ -93,11 +96,21 @@ fi
 run_step 02_nvidia_drivers.sh
 run_step 03_zerotier.sh
 
+# Wait for ZeroTier authorization (non-interactive -- polls until node gets an IP)
 echo ""
-echo "==> ACTION REQUIRED: Authorize the ZeroTier node shown above at:"
-echo "    https://my.zerotier.com/network/d3ecf5726d14ac76"
-echo "==> Press ENTER once the node is authorized to continue..."
-read -r
+echo "==> Waiting for ZeroTier node to be authorized and get an IP..."
+echo "==> Authorize at: https://my.zerotier.com/network/d3ecf5726d14ac76"
+ZT_TIMEOUT=300  # 5 minutes
+ZT_WAITED=0
+while ! zerotier-cli listnetworks | grep -q "OK PRIVATE"; do
+    sleep 5
+    ZT_WAITED=$((ZT_WAITED + 5))
+    if [[ $ZT_WAITED -ge $ZT_TIMEOUT ]]; then
+        echo "FATAL: ZeroTier node not authorized after ${ZT_TIMEOUT}s. Authorize and re-run." | tee -a "$LOG"
+        exit 1
+    fi
+done
+echo "==> ZeroTier is online." | tee -a "$LOG"
 
 run_step 04_houdini.sh
 run_step 04b_rclone_b2.sh

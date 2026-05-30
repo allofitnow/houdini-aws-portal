@@ -9,21 +9,14 @@ set -euo pipefail
 
 echo "==>"
 
-DRIVER_VERSION="535"
+DRIVER_VERSION="535-server"
 
-# Add NVIDIA apt repository
-curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/3bf863cc.pub \
-    | gpg --dearmor -o /usr/share/keyrings/nvidia-archive-keyring.gpg
-
-echo "deb [signed-by=/usr/share/keyrings/nvidia-archive-keyring.gpg] \
-https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/ /" \
-    > /etc/apt/sources.list.d/nvidia-cuda.list
-
+# Use Ubuntu repos' -server driver (DKMS-built for HWE kernels like 6.8.x-aws).
+# The CUDA repo's nvidia-driver-535 conflicts with kernel 6.8 on Jammy.
 apt-get update -y
 apt-get install -y \
     nvidia-driver-${DRIVER_VERSION} \
-    nvidia-utils-${DRIVER_VERSION} \
-    cuda-drivers
+    nvidia-utils-${DRIVER_VERSION}
 
 # Verify driver is loadable (won't show GPU without reboot, but package must install cleanly)
 dpkg -l | grep -E "nvidia-driver-${DRIVER_VERSION}" | grep -q "^ii" || {
