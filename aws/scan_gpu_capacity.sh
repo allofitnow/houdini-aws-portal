@@ -10,21 +10,21 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── Source libraries ──────────────────────────────────────────────────────────
-# shellcheck source=lib/spot_scores.sh
+# shellcheck source=aws/lib/spot_scores.sh
 source "${SCRIPT_DIR}/lib/spot_scores.sh"
-# shellcheck source=lib/instance_offerings.sh
+# shellcheck source=aws/lib/instance_offerings.sh
 source "${SCRIPT_DIR}/lib/instance_offerings.sh"
-# shellcheck source=lib/spot_pricing.sh
+# shellcheck source=aws/lib/spot_pricing.sh
 source "${SCRIPT_DIR}/lib/spot_pricing.sh"
-# shellcheck source=lib/ami_metadata.sh
+# shellcheck source=aws/lib/ami_metadata.sh
 source "${SCRIPT_DIR}/lib/ami_metadata.sh"
-# shellcheck source=lib/quota_check.sh
+# shellcheck source=aws/lib/quota_check.sh
 source "${SCRIPT_DIR}/lib/quota_check.sh"
-# shellcheck source=lib/state.sh
+# shellcheck source=aws/lib/state.sh
 source "${SCRIPT_DIR}/lib/state.sh"
-# shellcheck source=lib/fsm_labels.sh
+# shellcheck source=aws/lib/fsm_labels.sh
 source "${SCRIPT_DIR}/lib/fsm_labels.sh"
-# shellcheck source=lib/issue_log.sh
+# shellcheck source=aws/lib/issue_log.sh
 source "${SCRIPT_DIR}/lib/issue_log.sh"
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
@@ -201,6 +201,7 @@ main() {
         if ! query_spot_scores \
             --region "$_region" \
             --instance-types "$ALL_TYPES_STR" \
+            --target-capacity "$TARGET_CAPACITY" \
             --header \
             >> "$SPOT_SCORES_FILE"; then
             echo "ERROR: Spot score query failed for $_region" >&2

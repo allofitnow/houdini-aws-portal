@@ -165,10 +165,19 @@ query_quota_check() {
             --service-code ec2 \
             --quota-code "$qc" \
             --output json 2>&1)" || {
-            # list-service-quota-usage not available — fall back to 0 usage
-            echo "NOTE: list-service-quota-usage unavailable for $qc in $region. Reporting USAGE=0, STATUS=unknown." >&2
+            # list-service-quota-usage may be unavailable in some AWS CLI/account combinations.
+            # Fall back to checking the quota limit only; this is less precise but avoids
+            # incorrectly treating an unknown usage value as zero headroom.
+            local fallback_headroom fallback_status
+            fallback_headroom=$(awk -v limit="$limit_value" 'BEGIN { printf "%.0f", limit }')
+            if awk -v headroom="$fallback_headroom" -v target="$target_capacity" 'BEGIN { exit !(headroom >= target) }'; then
+                fallback_status="ok"
+            else
+                fallback_status="low"
+            fi
+            echo "NOTE: list-service-quota-usage unavailable for $qc in $region. Reporting USAGE=0 and using quota limit as headroom." >&2
             printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-                "$region" "$quota_name" "$qc" "0" "$limit_value" "0" "unknown"
+                "$region" "$quota_name" "$qc" "0" "$limit_value" "$fallback_headroom" "$fallback_status"
             continue
         }
 
@@ -179,10 +188,10 @@ query_quota_check() {
 
         # ── Compute headroom and status ───────────────────────────────────────
         local headroom
-        headroom=$(( limit_value - usage_value ))
+        headroom=$(awk -v limit="$limit_value" -v usage="$usage_value" 'BEGIN { h = limit - usage; if (h < 0) h = 0; printf "%.0f", h }')
 
         local status
-        if [[ "$headroom" -ge "$target_capacity" ]]; then
+        if awk -v headroom="$headroom" -v target="$target_capacity" 'BEGIN { exit !(headroom >= target) }'; then
             status="ok"
         else
             status="low"

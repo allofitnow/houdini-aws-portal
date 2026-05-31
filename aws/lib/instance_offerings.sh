@@ -65,12 +65,15 @@ query_instance_offerings() {
         return 1
     fi
 
+    local filter_values
+    filter_values=${instance_types// /,}
+
     # ── Dry-run: print command and exit ───────────────────────────────────
     if (( dry_run )); then
         echo "aws ec2 describe-instance-type-offerings" \
              "--region ${region}" \
              "--location-type availability-zone" \
-             "--filters \"Name=instance-type,Values=${instance_types}\"" >&2
+             "--filters \"Name=instance-type,Values=${filter_values}\"" >&2
         return 0
     fi
 
@@ -90,14 +93,14 @@ query_instance_offerings() {
             page_json=$(aws ec2 describe-instance-type-offerings \
                 --region "$region" \
                 --location-type availability-zone \
-                --filters "Name=instance-type,Values=${instance_types}" \
+                --filters "Name=instance-type,Values=${filter_values}" \
                 --starting-token "$next_token" \
                 --output json 2>/dev/null)
         else
             page_json=$(aws ec2 describe-instance-type-offerings \
                 --region "$region" \
                 --location-type availability-zone \
-                --filters "Name=instance-type,Values=${instance_types}" \
+                --filters "Name=instance-type,Values=${filter_values}" \
                 --output json 2>/dev/null)
         fi
 
@@ -131,7 +134,7 @@ query_instance_offerings() {
     if [[ -n "$all_offerings" ]]; then
         # Combine all page arrays into one and emit TSV rows
         local tsv_rows
-        tsv_rows=$(printf '%s\n' "$all_offerings" | jq -s 'flatten | .[] |
+        tsv_rows=$(printf '%s\n' "$all_offerings" | jq -r -s 'flatten | .[] |
             .InstanceType as $it |
             .Location as $loc |
             "\($it)\t\($loc)"')

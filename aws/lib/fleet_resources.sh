@@ -18,7 +18,7 @@ fi
 _FR_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── Source portal_discovery.sh so we can call query_portal_discovery ──────────
-# shellcheck source=portal_discovery.sh
+# shellcheck source=aws/lib/portal_discovery.sh
 source "${_FR_SELF_DIR}/portal_discovery.sh"
 
 # ── Internal helpers ──────────────────────────────────────────────────────────

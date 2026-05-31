@@ -146,9 +146,9 @@ query_spot_pricing() {
                     (map(.SpotPrice | tonumber) | min) as $mn |
                     (map(.SpotPrice | tonumber) | max) as $mx |
                     (map(.SpotPrice | tonumber) | add / length) as $av |
-                    {min: ($mn * 10000 | round / 10000 | tostring), \
-                     max: ($mx * 10000 | round / 10000 | tostring), \
-                     avg: ($av * 10000 | round / 10000 | tostring), \
+                    {min: ($mn * 10000 | round / 10000 | tostring),
+                     max: ($mx * 10000 | round / 10000 | tostring),
+                     avg: ($av * 10000 | round / 10000 | tostring),
                      count: length}
                   end
             ')"
