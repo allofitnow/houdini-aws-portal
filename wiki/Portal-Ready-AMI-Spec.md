@@ -90,33 +90,67 @@ runcmd:
   - echo 'region = us-west-2'>> /home/ec2-user/.aws/config
 ```
 
-### Ubuntu compatibility issues in Portal user-data
+### Base OS investigation: Amazon Linux 2 vs AL2023 vs Ubuntu 22.04
 
-The Portal user-data targets Amazon Linux 2. The new AMI must handle these
-Ubuntu incompatibilities:
+#### Amazon Linux 2 -- BLOCKED
 
-| Portal user-data command | Problem | Fix in AMI |
+AL2 ships with glibc 2.26 and gcc 7.3. Houdini 21.0 is distributed as
+`houdini-21.0.<build>-linux_x86_64_gcc11.2.tar.gz` and requires glibc >= 2.34.
+This is a hard incompatibility -- glibc cannot be upgraded independently.
+
+#### Amazon Linux 2023 -- POSSIBLE, same shim count as Ubuntu
+
+AL2023.12 (current, June 2026) ships glibc >= 2.38 and gcc 11.x.
+Houdini 21.0 would run. However, the Portal user-data still needs compatibility
+shims because it was written for AL2, not AL2023:
+
+| Portal user-data command | AL2023 Problem | Fix |
 |---|---|---|
-| `sudo service awslogs stop/start` | `awslogs` agent not installed on Ubuntu | Install CloudWatch agent or create a no-op service |
-| `sudo python /opt/Thinkbox/CloudWatchSetup/bin/...` | Thinkbox CloudWatch scripts may not exist | Ensure Deadline Client installer creates these paths |
-| `sudo chkconfig --add awslogs` | `chkconfig` doesn't exist on Ubuntu | Install `sysvinit-utils` which provides `chkconfig`, or symlink to `update-rc.d` |
-| `/home/ec2-user/.aws/config` | Portal assumes `ec2-user` home | Create `ec2-user` user during AMI build, or symlink |
-| `sed -im` (in-place with backup) | Works on both, no issue | No change needed |
-| `sudo service deadline10launcher restart` | Uses `service` not `systemctl` | `service` wrapper works on Ubuntu if systemd unit exists |
+| `sudo service awslogs stop/start` | AL2023 uses `amazon-cloudwatch-agent`, not `awslogs` | Create no-op `awslogs` service unit |
+| `sudo python /opt/Thinkbox/CloudWatchSetup/bin/...` | AL2023 has `python3`, not `python` (v2) | Symlink `python` -> `python3` |
+| `sudo chkconfig --add awslogs` | `chkconfig` exists but `awslogs` doesn't | Same as above: no-op service |
+| `/home/ec2-user/.aws/config` | Native on AL2023 | No fix needed |
+| `sudo service deadline10launcher restart` | Works natively | No fix needed |
+| `sed -im` | Works natively | No fix needed |
+
+AL2023 shims: 3 (awslogs no-op, python symlink, chkconfig for awslogs)
+Ubuntu shims: 3 (ec2-user creation, chkconfig install, awslogs no-op)
+
+Both need the same number of shims. AL2023 is marginally closer but the shim
+count is identical.
+
+#### Ubuntu 22.04 -- Rejected in favor of AL2023
+
+Ubuntu 22.04 has glibc 2.35 and gcc 11. Houdini 21.0 is proven to work.
+Rejected because AL2023 is the AWS-recommended OS for Portal workloads
+and requires the same number of shims (3).
 
 ---
 
 ## New AMI build script changes
 
+### Base OS: Amazon Linux 2023 (AL2023)
+
+AMI: `al2023-ami-2023.12.20260608.0-kernel-6.1-x86_64` (latest AL2023)
+
+AL2023 specifics:
+- Package manager: `dnf`
+- Default user: `ec2-user` (already exists)
+- glibc: >= 2.38 (Houdini 21.0 gcc11.2 compatible)
+- Python: `python3` only, no `python` v2 (needs symlink)
+- `chkconfig`: available
+- `awslogs`: NOT available (AL2023 uses `amazon-cloudwatch-agent`)
+- `service` wrapper: works via systemd
+
 ### Scripts to keep (with modifications)
 
 | Script | Changes |
 |---|---|
-| `01_system_prep.sh` | Add `ec2-user` user creation. Install `chkconfig` or `sysvinit-utils`. |
-| `02_nvidia_drivers.sh` | No changes. |
-| `04_houdini.sh` | No changes (Houdini install + UBL service). |
-| `05_deadline_worker.sh` | **Major rewrite** — see below. |
-| `06_cleanup.sh` | Remove ZeroTier state cleanup. Add `ec2-user` home cleanup. |
+| `01_system_prep.sh` | Full rewrite for AL2023: `dnf install` instead of `apt install`. Symlink `python` -> `python3`. Create no-op `awslogs` service. No `ec2-user` creation needed. |
+| `02_nvidia_drivers.sh` | Rewrite dependency packages: `kernel-devel` matched to running kernel, `gcc`, `make`, `elfutils-libelf-devel` instead of Ubuntu packages. |
+| `04_houdini.sh` | Rewrite dependency install: `dnf install` for `libX*`, `mesa*`, `alsa*`, `ffmpeg` etc. Keep UBL service. Ensure `.sesi_licenses.pref` written for `ec2-user`. |
+| `05_deadline_worker.sh` | **Major rewrite** — same logic as Ubuntu version but with AL2023 package deps. |
+| `06_cleanup.sh` | Remove ZeroTier state cleanup. Add `ec2-user` home cleanup. Remove apt-specific cleanup. |
 
 ### Scripts to remove
 
@@ -147,8 +181,9 @@ ZeroTier IP. The new version must:
    The Portal user-data calls these. If the installer doesn't create them,
    create no-op wrappers.
 
-5. **Create `/home/ec2-user`** with proper permissions. Portal user-data
-   writes AWS config there.
+5. **Ensure `/home/ec2-user` has proper permissions.** The default AL2023
+   `ec2-user` already exists. Portal user-data writes AWS config there.
+   Ensure `.aws/config` path is writable.
 
 6. **Ensure `/var/lib/Thinkbox/Deadline10/deadline.ini` exists** with at
    minimum:
