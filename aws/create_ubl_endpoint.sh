@@ -1,328 +1,290 @@
 #!/usr/bin/env bash
-# create_ubl_endpoint.sh
-# Create or reuse the Deadline Cloud UBL license endpoint for the active AWS Portal infrastructure.
-# Run this after AWS Portal Start Infrastructure reaches CREATE_COMPLETE and before Start Spot Fleet.
+# aws/create_ubl_endpoint.sh
+# Create or reuse a Deadline Cloud UBL license endpoint for Portal workers.
+# Discovers the active Portal stack, creates/reuses the endpoint, attaches
+# SideFX metered products, opens worker SG self-ingress, and writes the
+# endpoint DNS to Secrets Manager.
+#
+# Prerequisites:
+#   - Portal infrastructure started from Deadline Monitor (CF stack CREATE_COMPLETE)
+#   - AWS CLI configured with deadline:* and ec2:* permissions
+#   - jq installed
+#
+# Usage:
+#   ./aws/create_ubl_endpoint.sh --region us-west-2            # apply
+#   ./aws/create_ubl_endpoint.sh --region us-west-2 --dry-run  # preview only
+#   ./aws/create_ubl_endpoint.sh --region us-west-2 --yes      # skip confirmation
 
 set -euo pipefail
 
-REGION="${REGION:-${AWS_REGION:-us-west-2}}"
-STACK_NAME="${STACK_NAME:-}"
-VPC_ID="${VPC_ID:-}"
-SUBNET_ID="${SUBNET_ID:-}"
-SG_ID="${SG_ID:-}"
+# --- Defaults ---
+REGION=""
+DRY_RUN=false
+YES=false
 SECRET_ID="${HOUDINI_LICENSE_ENDPOINT_SECRET_ID:-houdini/license-endpoint-dns}"
-PRODUCTS=("houdini-21.0" "karma-21.0" "mantra-21.0")
-COMMAND_MODE="dry-run"
-WAIT_TIMEOUT_SECONDS="${WAIT_TIMEOUT_SECONDS:-900}"
-WAIT_INTERVAL_SECONDS="${WAIT_INTERVAL_SECONDS:-15}"
+METERED_PRODUCTS="houdini-21.0 karma-21.0 mantra-21.0"
+LICENSE_PORTS="1715-1717"
 
-usage() {
-    cat >&2 <<USAGE
-Usage: $0 [options] [--yes|--dry-run]
-
-Creates or reuses the Deadline Cloud license endpoint for the current AWS Portal stack,
-attaches SideFX metered products, opens worker SG self-ingress on TCP 1715-1717,
-and writes the endpoint DNS to Secrets Manager. Defaults to dry-run.
-
-Options:
-  --region REGION                 AWS region (default: REGION/AWS_REGION/us-west-2)
-  --stack-name STACK_NAME         AWS Portal parent stack name; auto-discovers newest active stack if omitted
-  --vpc-id VPC_ID                 Override discovered Portal VPC
-  --subnet-id SUBNET_ID           Override discovered endpoint subnet; defaults to Portal PublicSubnet
-  --sg-id SG_ID                   Override discovered endpoint/worker SG; defaults to ReverseSlaveSG
-  --secret-id SECRET_ID           Secrets Manager secret for endpoint DNS (default: houdini/license-endpoint-dns)
-  --products CSV                  Metered products to attach (default: houdini-21.0,karma-21.0,mantra-21.0)
-  --wait-timeout-seconds SECONDS  Endpoint READY timeout (default: 900)
-  --yes                           Apply changes
-  --dry-run                       Print planned changes only (default)
-USAGE
-}
-
+# --- Parse args ---
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --region|--aws-region)
-            REGION="$2"
-            shift 2
-            ;;
-        --stack-name)
-            STACK_NAME="$2"
-            shift 2
-            ;;
-        --vpc-id)
-            VPC_ID="$2"
-            shift 2
-            ;;
-        --subnet-id)
-            SUBNET_ID="$2"
-            shift 2
-            ;;
-        --sg-id|--security-group-id)
-            SG_ID="$2"
-            shift 2
-            ;;
-        --secret-id)
-            SECRET_ID="$2"
-            shift 2
-            ;;
-        --products)
-            IFS=',' read -r -a PRODUCTS <<< "$2"
-            shift 2
-            ;;
-        --wait-timeout-seconds)
-            WAIT_TIMEOUT_SECONDS="$2"
-            shift 2
-            ;;
-        --yes)
-            COMMAND_MODE="apply"
-            shift
-            ;;
-        --dry-run)
-            COMMAND_MODE="dry-run"
-            shift
-            ;;
+        --region)     REGION="$2"; shift 2 ;;
+        --dry-run)    DRY_RUN=true; shift ;;
+        --yes)        YES=true; shift ;;
+        --secret-id)  SECRET_ID="$2"; shift 2 ;;
         -h|--help)
-            usage
+            echo "Usage: $0 --region <region> [--dry-run] [--yes] [--secret-id <secret>]"
+            echo ""
+            echo "Options:"
+            echo "  --region      AWS region (required)"
+            echo "  --dry-run     Preview changes without applying"
+            echo "  --yes         Skip confirmation prompt"
+            echo "  --secret-id   Secrets Manager secret name (default: houdini/license-endpoint-dns)"
             exit 0
             ;;
-        *)
-            echo "ERROR: Unknown argument '$1'" >&2
-            usage
-            exit 1
-            ;;
+        *) echo "Unknown argument: $1"; exit 1 ;;
     esac
 done
 
-run_or_print() {
-    if [[ "$COMMAND_MODE" == "apply" ]]; then
-        "$@"
-    else
-        printf 'DRY-RUN:'
-        printf ' %q' "$@"
-        printf '\n'
-    fi
-}
-
-aws_text() {
-    aws "$@" --output text
-}
-
-aws_json() {
-    aws "$@" --output json
-}
-
-discover_stack_name() {
-    local stack_names
-    local stack_name_array
-    local stack_name
-    local vpc_id
-
-    stack_names=$(aws_text cloudformation list-stacks \
-        --region "$REGION" \
-        --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
-        --query "reverse(sort_by(StackSummaries[?starts_with(StackName,'stack')], &CreationTime))[].StackName")
-
-    read -r -a stack_name_array <<< "$stack_names"
-    for stack_name in "${stack_name_array[@]}"; do
-        vpc_id=$(aws_text cloudformation describe-stack-resources \
-            --region "$REGION" \
-            --stack-name "$stack_name" \
-            --query "StackResources[?LogicalResourceId=='ReverseDashVPC'].PhysicalResourceId | [0]" 2>/dev/null || true)
-
-        if [[ -n "$vpc_id" && "$vpc_id" != "None" ]]; then
-            printf '%s\n' "$stack_name"
-            return 0
-        fi
-    done
-}
-
-stack_resource() {
-    local logical_id="$1"
-    aws_text cloudformation describe-stack-resources \
-        --region "$REGION" \
-        --stack-name "$STACK_NAME" \
-        --query "StackResources[?LogicalResourceId=='${logical_id}'].PhysicalResourceId | [0]"
-}
-
-existing_license_endpoint_for_vpc() {
-    aws_text deadline list-license-endpoints \
-        --region "$REGION" \
-        --query "licenseEndpoints[?vpcId=='${VPC_ID}'].licenseEndpointId | [0]" 2>/dev/null || true
-}
-
-wait_for_endpoint_ready() {
-    local endpoint_id="$1"
-    local elapsed=0
-    local status=""
-    local status_message=""
-
-    while (( elapsed <= WAIT_TIMEOUT_SECONDS )); do
-        status=$(aws_text deadline get-license-endpoint \
-            --region "$REGION" \
-            --license-endpoint-id "$endpoint_id" \
-            --query "status")
-        status_message=$(aws_text deadline get-license-endpoint \
-            --region "$REGION" \
-            --license-endpoint-id "$endpoint_id" \
-            --query "statusMessage" 2>/dev/null || true)
-
-        echo "License endpoint ${endpoint_id} status: ${status} (${status_message})"
-        if [[ "$status" == "READY" ]]; then
-            return 0
-        fi
-        if [[ "$status" == "CREATE_FAILED" || "$status" == "DELETE_FAILED" ]]; then
-            return 1
-        fi
-
-        sleep "$WAIT_INTERVAL_SECONDS"
-        elapsed=$((elapsed + WAIT_INTERVAL_SECONDS))
-    done
-
-    echo "ERROR: License endpoint ${endpoint_id} did not reach READY within ${WAIT_TIMEOUT_SECONDS}s." >&2
-    return 1
-}
-
-ensure_secret_value() {
-    local dns_name="$1"
-
-    if [[ "$COMMAND_MODE" == "dry-run" ]]; then
-        echo "DRY-RUN: would create/update Secrets Manager secret ${SECRET_ID} with ${dns_name}"
-        return
-    fi
-
-    if aws secretsmanager describe-secret --region "$REGION" --secret-id "$SECRET_ID" >/dev/null 2>&1; then
-        aws secretsmanager put-secret-value \
-            --region "$REGION" \
-            --secret-id "$SECRET_ID" \
-            --secret-string "$dns_name" \
-            --output text >/dev/null
-    else
-        aws secretsmanager create-secret \
-            --region "$REGION" \
-            --name "$SECRET_ID" \
-            --secret-string "$dns_name" \
-            --output text >/dev/null
-    fi
-}
-
-ensure_self_ingress() {
-    if [[ "$COMMAND_MODE" == "dry-run" ]]; then
-        echo "DRY-RUN: would authorize ${SG_ID} self-ingress TCP 1715-1717"
-        return
-    fi
-
-    if aws ec2 authorize-security-group-ingress \
-        --region "$REGION" \
-        --group-id "$SG_ID" \
-        --protocol tcp \
-        --port 1715-1717 \
-        --source-group "$SG_ID" \
-        --output text >/tmp/create_ubl_endpoint_sg.out 2>/tmp/create_ubl_endpoint_sg.err; then
-        echo "Authorized ${SG_ID} self-ingress TCP 1715-1717."
-        return
-    fi
-
-    if grep -q "InvalidPermission.Duplicate" /tmp/create_ubl_endpoint_sg.err; then
-        echo "Security group self-ingress TCP 1715-1717 already exists on ${SG_ID}."
-        return
-    fi
-
-    cat /tmp/create_ubl_endpoint_sg.err >&2
-    return 1
-}
-
-if [[ -z "$STACK_NAME" ]]; then
-    STACK_NAME=$(discover_stack_name)
-fi
-
-if [[ -z "$STACK_NAME" || "$STACK_NAME" == "None" ]]; then
-    echo "ERROR: No active AWS Portal stack found in ${REGION}. Run Start Infrastructure first." >&2
+if [[ -z "$REGION" ]]; then
+    echo "ERROR: --region is required"
     exit 1
 fi
 
-if [[ -z "$VPC_ID" ]]; then
-    VPC_ID=$(stack_resource ReverseDashVPC)
-fi
-if [[ -z "$SUBNET_ID" ]]; then
-    SUBNET_ID=$(stack_resource PublicSubnet)
-fi
-if [[ -z "$SG_ID" ]]; then
-    SG_ID=$(stack_resource ReverseSlaveSG)
-fi
+# --- Helpers ---
+log()  { echo "[$(date '+%H:%M:%S')] $*"; }
+die()  { echo "ERROR: $*" >&2; exit 1; }
 
-for required in STACK_NAME VPC_ID SUBNET_ID SG_ID SECRET_ID; do
-    if [[ -z "${!required}" || "${!required}" == "None" ]]; then
-        echo "ERROR: Missing required value ${required}." >&2
-        exit 1
+# --- Step 1: Discover Portal stack ---
+log "Discovering Portal CloudFormation stack in $REGION..."
+
+PARENT_STACK=""
+MAPFILE -T STACKS < <(aws cloudformation describe-stacks \
+    --region "$REGION" \
+    --query "Stacks[?StackStatus=='CREATE_COMPLETE'].StackName" \
+    --output text 2>/dev/null | tr '\t' '\n') || die "Failed to list CloudFormation stacks"
+
+for stack in "${STACKS[@]}"; do
+    [[ -z "$stack" ]] && continue
+    # Check if this stack has the Portal-specific outputs
+    HAS_VPC=$(aws cloudformation describe-stacks \
+        --region "$REGION" \
+        --stack-name "$stack" \
+        --query "Stacks[0].Outputs[?OutputKey=='VPCID'].OutputValue" \
+        --output text 2>/dev/null || echo "")
+    if [[ -n "$HAS_VPC" ]]; then
+        HAS_RF=$(aws cloudformation describe-stacks \
+            --region "$REGION" \
+            --stack-name "$stack" \
+            --query "Stacks[0].Outputs[?OutputKey=='ReverseForwarderInstanceId'].OutputValue" \
+            --output text 2>/dev/null || echo "")
+        if [[ -n "$HAS_RF" ]]; then
+            PARENT_STACK="$stack"
+            break
+        fi
     fi
 done
 
-cat <<SUMMARY
-=== Deadline Cloud UBL endpoint setup (${COMMAND_MODE}) ===
-Region:         ${REGION}
-Portal stack:   ${STACK_NAME}
-VPC:            ${VPC_ID}
-Endpoint subnet:${SUBNET_ID}
-Endpoint SG:    ${SG_ID}
-Secret ID:      ${SECRET_ID}
-Products:       ${PRODUCTS[*]}
-SUMMARY
+if [[ -z "$PARENT_STACK" ]]; then
+    die "No Portal infrastructure stack found in $REGION. Start infrastructure from Deadline Monitor first."
+fi
 
-license_endpoint_id=$(existing_license_endpoint_for_vpc)
+log "Found Portal stack: $PARENT_STACK"
 
-if [[ -z "$license_endpoint_id" || "$license_endpoint_id" == "None" ]]; then
-    if [[ "$COMMAND_MODE" == "dry-run" ]]; then
-        echo "DRY-RUN: would create Deadline Cloud license endpoint in ${VPC_ID}"
-        license_endpoint_id="<new-license-endpoint-id>"
+# --- Step 2: Extract VPC, subnet, and security group ---
+VPC_ID=$(aws cloudformation describe-stacks \
+    --region "$REGION" \
+    --stack-name "$PARENT_STACK" \
+    --query "Stacks[0].Outputs[?OutputKey=='VPCID'].OutputValue" \
+    --output text)
+
+MAIN_AZ=$(aws cloudformation describe-stacks \
+    --region "$REGION" \
+    --stack-name "$PARENT_STACK" \
+    --query "Stacks[0].Outputs[?OutputKey=='MainAvailabilityZone'].OutputValue" \
+    --output text)
+
+AZ_STACK="${PARENT_STACK}-${MAIN_AZ}"
+SUBNET_ID=$(aws cloudformation describe-stacks \
+    --region "$REGION" \
+    --stack-name "$AZ_STACK" \
+    --query "Stacks[0].Outputs[?OutputKey=='SubnetID'].OutputValue" \
+    --output text 2>/dev/null || die "AZ stack $AZ_STACK not found")
+
+# Find ReverseSlaveSG in the Portal VPC
+SG_ID=$(aws ec2 describe-security-groups \
+    --region "$REGION" \
+    --filters "Name=vpc-id,Values=$VPC_ID" "Name=group-name,Values=*ReverseSlaveSG*" \
+    --query "SecurityGroups[0].GroupId" \
+    --output text)
+
+if [[ -z "$SG_ID" || "$SG_ID" == "None" ]]; then
+    die "ReverseSlaveSG not found in VPC $VPC_ID"
+fi
+
+log "VPC: $VPC_ID"
+log "Subnet ($MAIN_AZ): $SUBNET_ID"
+log "Worker SG: $SG_ID"
+
+# --- Step 3: Check for existing license endpoint in this VPC ---
+EXISTING_LE=""
+EXISTING_DNS=""
+
+LE_IDS=$(aws deadline list-license-endpoints \
+    --region "$REGION" \
+    --query "licenseEndpoints[].licenseEndpointId" \
+    --output text 2>/dev/null || echo "")
+
+for le_id in $LE_IDS; do
+    [[ -z "$le_id" ]] && continue
+    LE_VPC=$(aws deadline get-license-endpoint \
+        --region "$REGION" \
+        --license-endpoint-id "$le_id" \
+        --query "vpcId" \
+        --output text 2>/dev/null || echo "")
+    LE_STATUS=$(aws deadline get-license-endpoint \
+        --region "$REGION" \
+        --license-endpoint-id "$le_id" \
+        --query "status" \
+        --output text 2>/dev/null || echo "")
+    if [[ "$LE_VPC" == "$VPC_ID" && "$LE_STATUS" == "READY" ]]; then
+        EXISTING_LE="$le_id"
+        EXISTING_DNS=$(aws deadline get-license-endpoint \
+            --region "$REGION" \
+            --license-endpoint-id "$le_id" \
+            --query "dnsName" \
+            --output text 2>/dev/null)
+        break
+    fi
+done
+
+ENDPOINT_ID=""
+DNS_NAME=""
+
+if [[ -n "$EXISTING_LE" ]]; then
+    log "Reusing existing license endpoint: $EXISTING_LE"
+    log "DNS: $EXISTING_DNS"
+    ENDPOINT_ID="$EXISTING_LE"
+    DNS_NAME="$EXISTING_DNS"
+else
+    # --- Step 4: Create license endpoint ---
+    log "No existing endpoint found. Creating new license endpoint..."
+
+    if ! $YES && ! $DRY_RUN; then
+        echo ""
+        echo "About to create license endpoint with:"
+        echo "  VPC:       $VPC_ID"
+        echo "  Subnet:    $SUBNET_ID"
+        echo "  SG:        $SG_ID"
+        echo "  Region:    $REGION"
+        echo ""
+        read -rp "Proceed? [y/N] " CONFIRM
+        [[ "$CONFIRM" =~ ^[Yy]$ ]] || die "Aborted."
+    fi
+
+    if $DRY_RUN; then
+        log "[DRY-RUN] Would create endpoint and wait for READY"
+        ENDPOINT_ID="(dry-run)"
+        DNS_NAME="(dry-run)"
     else
-        license_endpoint_id=$(aws_text deadline create-license-endpoint \
+        CREATE_OUTPUT=$(aws deadline create-license-endpoint \
             --region "$REGION" \
             --vpc-id "$VPC_ID" \
             --subnet-ids "$SUBNET_ID" \
             --security-group-ids "$SG_ID" \
-            --query "licenseEndpointId")
-        echo "Created Deadline Cloud license endpoint: ${license_endpoint_id}"
-        wait_for_endpoint_ready "$license_endpoint_id"
-    fi
-else
-    echo "Reusing existing Deadline Cloud license endpoint in ${VPC_ID}: ${license_endpoint_id}"
-    if [[ "$COMMAND_MODE" == "apply" ]]; then
-        wait_for_endpoint_ready "$license_endpoint_id"
+            --output json) || die "Failed to create license endpoint"
+
+        ENDPOINT_ID=$(echo "$CREATE_OUTPUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['licenseEndpointId'])")
+        log "Created endpoint: $ENDPOINT_ID"
+
+        # Wait for READY
+        log "Waiting for READY status..."
+        for _attempt in $(seq 1 40); do
+            STATUS=$(aws deadline get-license-endpoint \
+                --region "$REGION" \
+                --license-endpoint-id "$ENDPOINT_ID" \
+                --query "status" \
+                --output text 2>/dev/null)
+            if [[ "$STATUS" == "READY" ]]; then
+                log "Endpoint is READY!"
+                break
+            fi
+            if [[ "$STATUS" == "FAILED" ]]; then
+                die "Endpoint creation FAILED"
+            fi
+            sleep 15
+        done
+
+        DNS_NAME=$(aws deadline get-license-endpoint \
+            --region "$REGION" \
+            --license-endpoint-id "$ENDPOINT_ID" \
+            --query "dnsName" \
+            --output text)
+        log "DNS: $DNS_NAME"
     fi
 fi
 
-for product_id in "${PRODUCTS[@]}"; do
-    [[ -n "$product_id" ]] || continue
-    run_or_print aws deadline put-metered-product \
-        --region "$REGION" \
-        --license-endpoint-id "$license_endpoint_id" \
-        --product-id "$product_id"
+# --- Step 5: Attach metered products ---
+log "Attaching metered products: $METERED_PRODUCTS"
+for product in $METERED_PRODUCTS; do
+    if $DRY_RUN; then
+        log "  [DRY-RUN] Would attach: $product"
+    else
+        aws deadline put-metered-product \
+            --region "$REGION" \
+            --license-endpoint-id "$ENDPOINT_ID" \
+            --product-id "$product" \
+            --output json || true
+        log "  Attached: $product"
+    fi
 done
 
-ensure_self_ingress
+# --- Step 6: Open SG self-ingress for license ports ---
+log "Ensuring SG self-ingress on TCP $LICENSE_PORTS..."
+EXISTING_RULE=$(aws ec2 describe-security-group-rules \
+    --region "$REGION" \
+    --filters "Name=group-id,Values=$SG_ID" "Name=is-egress,Values=false" \
+    --query "SecurityGroupRules[?IpProtocol=='tcp' && FromPort==\`${LICENSE_PORTS%%-*}\` && ToPort==\`${LICENSE_PORTS##*-}\` && ReferencedGroupInfo.GroupId=='$SG_ID'].SecurityGroupRuleId" \
+    --output text 2>/dev/null || echo "")
 
-if [[ "$COMMAND_MODE" == "apply" ]]; then
-    dns_name=$(aws_text deadline get-license-endpoint \
-        --region "$REGION" \
-        --license-endpoint-id "$license_endpoint_id" \
-        --query "dnsName")
+if [[ -z "$EXISTING_RULE" || "$EXISTING_RULE" == "None" ]]; then
+    if $DRY_RUN; then
+        log "  [DRY-RUN] Would open TCP $LICENSE_PORTS (self-referencing)"
+    else
+        aws ec2 authorize-security-group-ingress \
+            --region "$REGION" \
+            --group-id "$SG_ID" \
+            --protocol tcp \
+            --port "$LICENSE_PORTS" \
+            --source-group "$SG_ID" \
+            --output json
+        log "  Opened TCP $LICENSE_PORTS (self-referencing)"
+    fi
 else
-    dns_name="<license-endpoint-dns>"
+    log "  Already open (skipping)"
 fi
 
-ensure_secret_value "$dns_name"
-
-echo ""
-echo "License endpoint ID: ${license_endpoint_id}"
-echo "License endpoint DNS: ${dns_name}"
-
-if [[ "$COMMAND_MODE" == "apply" ]]; then
-    echo ""
-    echo "Attached metered products:"
-    aws deadline list-metered-products \
+# --- Step 7: Write DNS to Secrets Manager ---
+log "Writing endpoint DNS to Secrets Manager: $SECRET_ID"
+if $DRY_RUN; then
+    log "  [DRY-RUN] Would write DNS to $SECRET_ID"
+else
+    aws secretsmanager put-secret-value \
         --region "$REGION" \
-        --license-endpoint-id "$license_endpoint_id" \
-        --output table
+        --secret-id "$SECRET_ID" \
+        --secret-string "$DNS_NAME" \
+        --output json || die "Failed to update secret"
+    log "  Updated secret: $SECRET_ID"
 fi
 
+# --- Done ---
 echo ""
-echo "Next: use AWS Portal → right-click completed infrastructure → Start Spot Fleet."
+echo "=== UBL Endpoint Ready ==="
+echo "Endpoint ID:  $ENDPOINT_ID"
+echo "DNS:          $DNS_NAME"
+echo "Secret:       $SECRET_ID"
+echo "VPC:          $VPC_ID"
+echo "Products:     $METERED_PRODUCTS"
+echo "SG rule:      $SG_ID TCP $LICENSE_PORTS (self)"
+echo ""
+echo "Next: Right-click the Infrastructure row in Deadline Monitor -> Start Spot Fleet"
