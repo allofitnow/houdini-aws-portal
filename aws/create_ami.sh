@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # create_ami.sh
-# Stop the build instance and create the worker AMI from it.
+# Stop the build instance and create the Portal-ready worker AMI from it.
 # Run from your local workstation after build.sh completes on the instance.
+#
+# Preconditions:
+#   - build.sh has completed successfully on the target instance
+#   - AWS credentials with EC2 AMI creation permissions are configured
 
 set -euo pipefail
 
 REGION="${REGION:-${AWS_REGION:-us-west-2}}"
-AMI_NAME="${AMI_NAME:-deadline-10.4.2.3-houdini-21.0-ubuntu22-gpu-v1}"
-AMI_DESC="${AMI_DESC:-Deadline 10.4.2.3 + Houdini 21.0 UBL + ZeroTier + rclone B2. Ubuntu 22.04, NVIDIA GPU driver. Region ${REGION}.}"
+AMI_NAME="${AMI_NAME:-deadline-10.4.2.3-houdini-21.0-al2023-l40s-v1}"
+AMI_DESC="${AMI_DESC:-Portal-ready Deadline 10.4.2.3 + Houdini 21.0.729 UBL. Amazon Linux 2023, NVIDIA L40S GPU driver (R550). Region ${REGION}.}"
 INSTANCE_ID=""
 
 usage() {
@@ -44,7 +48,7 @@ AMI_ID=$(aws ec2 create-image \
     --name "$AMI_NAME" \
     --description "$AMI_DESC" \
     --no-reboot \
-    --tag-specifications "ResourceType=image,Tags=[{Key=Name,Value=${AMI_NAME}},{Key=DeadlineVersion,Value=10.4.2.3},{Key=HoudiniVersion,Value=21.0},{Key=Region,Value=${REGION}}]" \
+    --tag-specifications "ResourceType=image,Tags=[{Key=Name,Value=${AMI_NAME}},{Key=DeadlineVersion,Value=10.4.2.3},{Key=HoudiniVersion,Value=21.0},{Key=OS,Value=AL2023},{Key=GPU,Value=L40S},{Key=PortalReady,Value=true},{Key=Region,Value=${REGION}}]" \
     --query "ImageId" \
     --output text)
 
@@ -58,5 +62,5 @@ echo "  AMI ID   : $AMI_ID"
 echo "  AMI Name : $AMI_NAME"
 echo "  Region   : $REGION"
 echo ""
-echo "Next: register this region-local AMI in Deadline Monitor > Tools > Configure AWS Portal."
+echo "Next: register this AMI in Deadline Monitor > Tools > Configure AWS Portal."
 echo "See deadline/aws_portal_notes.md for full configuration steps."

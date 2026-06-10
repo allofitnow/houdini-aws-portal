@@ -1,21 +1,25 @@
 #!/usr/bin/env bash
 # 04_houdini.sh
 # Install Houdini 21.0 in headless/non-interactive mode and configure
-# AWS Deadline Cloud UBL licensing.
+# AWS Deadline Cloud UBL licensing for AL2023.
+#
+# Preconditions:
+#   - AL2023 EC2 instance with AWS CLI v2 and sufficient disk space
+#   - Environment vars set by build.sh: S3_BUCKET, HOUDINI_BUILD,
+#     HOUDINI_VERSION, AWS_REGION, HOUDINI_LICENSE_ENDPOINT_SECRET_ID
+#   - Houdini Linux installer tarball uploaded to
+#     s3://$S3_BUCKET/installers/houdini-21.0.<build>-linux_x86_64_gcc11.2.tar.gz
 #
 # Licensing method: AWS Deadline Cloud UBL (license endpoint in AWS VPC)
 #   - Workers set SideFX hserver to a chained Deadline Cloud license endpoint list
 #   - Endpoint is created via: aws deadline create-license-endpoint (see issue #9)
-#   - Endpoint DNS is stored in Secrets Manager as: houdini/license-endpoint-dns
+#   - Endpoint DNS is stored on Secrets Manager as: houdini/license-endpoint-dns
 #   - Billed through AWS — no SideFX token or local sesinetd required
 #   - Required inbound on worker SG: TCP 1715-1717 from ReverseSlaveSG to itself
 #
 # NOTE: houdini/license-endpoint-dns value is PENDING until the Deadline Cloud
 # license endpoint is created (issue #9). The worker will fail to acquire a
 # license until that secret is updated with the real endpoint DNS.
-#
-# Expects the Houdini 21.0 Linux installer tarball in S3:
-#   s3://$S3_BUCKET/installers/houdini-21.0.<build>-linux_x86_64_gcc11.2.tar.gz
 
 S3_BUCKET="${S3_BUCKET:-CHANGE_ME}"
 HOUDINI_VERSION="${HOUDINI_VERSION:-21.0}"
@@ -57,7 +61,7 @@ chmod +x /etc/profile.d/houdini.sh
 
 # Verify headless render binary. houdini_setup may not exist during dry-run review — non-fatal.
 # shellcheck source=/dev/null
-source "${INSTALL_DIR}/houdini_setup" 2>/dev/null || true
+source "${INSTALL_DIR}/houdini_setup" 2>/dev/null || true  # tolerates missing file during image review
 hython --version || {
     echo "ERROR: hython not found after Houdini install"
     exit 1
@@ -121,16 +125,16 @@ export QT_QPA_PLATFORM=offscreen
 EOF
 chmod 644 /etc/profile.d/houdini-license.sh
 
-# Persist hserver's license search list for root, ubuntu, and the system hserver user.
-install -d -m 755 /usr/lib/sesi/hserver /home/ubuntu
+# Persist hserver's license search list for root, ec2-user, and the system hserver user.
+install -d -m 755 /usr/lib/sesi/hserver /home/ec2-user
 printf 'serverhost=%s\n' "$LICENSE_CHAIN" > /usr/lib/sesi/hserver/.sesi_licenses.pref
 printf 'serverhost=%s\n' "$LICENSE_CHAIN" > /root/.sesi_licenses.pref
-printf 'serverhost=%s\n' "$LICENSE_CHAIN" > /home/ubuntu/.sesi_licenses.pref
-chown ubuntu:ubuntu /home/ubuntu/.sesi_licenses.pref 2>/dev/null || true
-chmod 644 /usr/lib/sesi/hserver/.sesi_licenses.pref /root/.sesi_licenses.pref /home/ubuntu/.sesi_licenses.pref
+printf 'serverhost=%s\n' "$LICENSE_CHAIN" > /home/ec2-user/.sesi_licenses.pref
+chown ec2-user:ec2-user /home/ec2-user/.sesi_licenses.pref 2>/dev/null || true  # tolerates missing user during image bake
+chmod 644 /usr/lib/sesi/hserver/.sesi_licenses.pref /root/.sesi_licenses.pref /home/ec2-user/.sesi_licenses.pref
 
 # Restart hserver if it was launched before the endpoint was configured.
-pkill -f hserver 2>/dev/null || true
+pkill -f hserver 2>/dev/null || true  # hserver may not be running during initial bake
 
 echo "Houdini license server chain set to: ${LICENSE_CHAIN}"
 BOOTSCRIPT

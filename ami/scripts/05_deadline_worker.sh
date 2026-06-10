@@ -1,72 +1,137 @@
 #!/usr/bin/env bash
 # 05_deadline_worker.sh
-# Install Thinkbox Deadline 10.4.2.3 Linux Worker and configure it to connect
-# to the on-prem repository over the ZeroTier overlay network.
-#
-# Expects the installer in S3:
-#   s3://$S3_BUCKET/installers/DeadlineClient-10.4.2.3-linux-x64-installer.run
-#
-# The worker is installed as a service but NOT started during AMI build.
-# It starts on first boot after ZeroTier is authorized, UBL is configured for
-# the selected worker region, and network connectivity is available.
-
-S3_BUCKET="${S3_BUCKET:-CHANGE_ME}"
-DEADLINE_REPO_IP="${DEADLINE_REPO_IP:-CHANGE_ME}"   # ZeroTier IP of on-prem repo
-DEADLINE_VERSION="10.4.2.3"
-DEADLINE_POOL="houdini-aws-gpu"
-DEADLINE_GROUP="linux-gpu"
-AWS_REGION="${AWS_REGION:-us-west-2}"
-INSTALLER="DeadlineClient-${DEADLINE_VERSION}-linux-x64-installer.run"
+# Install Thinkbox Deadline 10.4.2.3 Linux Worker for AWS Portal.
+# Connects via Remote connection type with empty ProxyRoot — Portal user-data
+# sets Region=<stack-name> at runtime for Gateway discovery.
+# Preconditions: S3_BUCKET and AWS_REGION are exported by build.sh.
+#   Step 01 (system prep) must be complete (python symlink, ec2-user, etc.).
 
 LOG=/var/log/ami-build.log
 exec >> "$LOG" 2>&1
 set -euo pipefail
 
-echo "==>"
+echo "==> [05] Deadline Worker install started at $(date)"
 
-TMP_DIR=$(mktemp -d)
+S3_BUCKET="${S3_BUCKET:?S3_BUCKET must be set by build.sh}"
+AWS_REGION="${AWS_REGION:-us-west-2}"
+DEADLINE_VERSION="10.4.2.3"
+INSTALLER="DeadlineClient-${DEADLINE_VERSION}-linux-x64-installer.run"
+INSTALL_PREFIX="/opt/Thinkbox/Deadline10"
+DEADLINE_VAR="/var/lib/Thinkbox/Deadline10"
 
-aws s3 cp "s3://${S3_BUCKET}/installers/${INSTALLER}" "${TMP_DIR}/${INSTALLER}" \
-    --region "$AWS_REGION"
+# ── Idempotency check ────────────────────────────────────────────────────────
+if [[ -x "${INSTALL_PREFIX}/bin/deadlinecommand" ]]; then
+    echo "==> [05] Deadline Worker already installed, skipping installer"
+else
+    # ── Download installer from S3 ───────────────────────────────────────────
+    TMP_DIR=$(mktemp -d)
+    aws s3 cp "s3://${S3_BUCKET}/installers/${INSTALLER}" "${TMP_DIR}/${INSTALLER}" \
+        --region "$AWS_REGION"
+    chmod +x "${TMP_DIR}/${INSTALLER}"
 
-chmod +x "${TMP_DIR}/${INSTALLER}"
+    # ── Unattended install ───────────────────────────────────────────────────
+    # Remote connection with EMPTY proxy root — Portal user-data configures the
+    # actual RCS endpoint at instance launch via Region=<stack-name>.
+    # --slavestartup false: Portal user-data enables the slave after config.
+    # --daemonuser root: Portal launcher runs as root.
+    "${TMP_DIR}/${INSTALLER}" \
+        --mode unattended \
+        --prefix "${INSTALL_PREFIX}" \
+        --connectiontype Remote \
+        --proxyrootdir "" \
+        --noguimode true \
+        --slavestartup false \
+        --launcherdaemon true \
+        --daemonuser root
 
-# Silent install — worker only, no Monitor, no Repository
-# Flags verified against 'DeadlineClient-10.4.2.3-linux-x64-installer.run --help'
-# Remote connection uses --proxyrootdir (host:port of RCS), not --remoteserver
-# Pool/Group are configured post-install via deadlinecommand
-"${TMP_DIR}/${INSTALLER}" \
-    --mode unattended \
-    --prefix /opt/Thinkbox/Deadline10 \
-    --connectiontype Remote \
-    --proxyrootdir "${DEADLINE_REPO_IP}:4433" \
-    --noguimode true \
-    --slavestartup true \
-    --launcherdaemon true
+    rm -rf "${TMP_DIR}"
+fi
 
-# Do not start the worker now — it will start on first boot once ZT is authorized
-# May fail on fresh install if unit not yet loaded — non-fatal
+# ── Disable launcher service — Portal user-data starts it after config ───────
+# May fail if unit not yet loaded on first install — non-fatal.
 systemctl disable deadline10launcher.service 2>/dev/null || true
 
-# Write a boot-order aware override: start Deadline only after ZT is up and UBL is ready
-mkdir -p /etc/systemd/system/deadline10launcher.service.d
-cat > /etc/systemd/system/deadline10launcher.service.d/override.conf << 'UNIT'
+# ── Systemd override: boot after UBL and network ────────────────────────────
+# Portal builds have no ZeroTier and no rclone — only UBL + network-online.
+OVERRIDE_DIR="/etc/systemd/system/deadline10launcher.service.d"
+OVERRIDE_FILE="${OVERRIDE_DIR}/override.conf"
+if [[ ! -f "$OVERRIDE_FILE" ]]; then
+    mkdir -p "$OVERRIDE_DIR"
+    cat > "$OVERRIDE_FILE" << 'UNIT'
 [Unit]
-After=network-online.target zerotier-one.service houdini-ubl.service rclone-b2-renders.service
+After=houdini-ubl.service network-online.target
 Wants=network-online.target
 UNIT
+    systemctl daemon-reload
+fi
+# Service stays disabled — Portal user-data enables and starts it at launch.
 
-systemctl daemon-reload
-# Re-enable so it starts on subsequent boots (worker waits for ZT auth on first)
-systemctl enable deadline10launcher.service
+# ── Ensure deadline.ini has Portal-compatible defaults ───────────────────────
+mkdir -p "${DEADLINE_VAR}"
+INI_FILE="${DEADLINE_VAR}/deadline.ini"
+if [[ ! -f "$INI_FILE" ]]; then
+    cat > "$INI_FILE" << INIEOF
+ConnectionType=Remote
+ProxyRoot=
+LaunchSlaveAtStartup=false
+INIEOF
+else
+    # Patch existing file to ensure Portal-compatible values
+    sed -i 's/^ConnectionType=.*/ConnectionType=Remote/' "$INI_FILE" 2>/dev/null || true
+    sed -i 's/^ProxyRoot=.*/ProxyRoot=/' "$INI_FILE" 2>/dev/null || true
+    sed -i 's/^LaunchSlaveAtStartup=.*/LaunchSlaveAtStartup=false/' "$INI_FILE" 2>/dev/null || true
+fi
 
-# Configure pool and group via deadlinecommand after install
-/opt/Thinkbox/Deadline10/bin/deadlinecommand -SetMachinePools "$(hostname)" "${DEADLINE_POOL}" 2>/dev/null || \
-    echo "WARNING: Could not set pool (may need repo connectivity)"
-/opt/Thinkbox/Deadline10/bin/deadlinecommand -SetMachineGroups "$(hostname)" "${DEADLINE_GROUP}" 2>/dev/null || \
-    echo "WARNING: Could not set group (may need repo connectivity)"
+# ── Ensure slaves directory exists and is writable ───────────────────────────
+mkdir -p "${DEADLINE_VAR}/slaves"
+chmod 777 "${DEADLINE_VAR}/slaves"
 
-rm -rf "$TMP_DIR"
+# ── Ensure /home/ec2-user/.aws/ directory exists ────────────────────────────
+# Created by 01_system_prep.sh but ensure it exists in case of re-runs.
+mkdir -p /home/ec2-user/.aws
+chown -R ec2-user:ec2-user /home/ec2-user/.aws
 
-echo "==> [05] Deadline Worker ${DEADLINE_VERSION} installed (service enabled, not started)"
-echo "==> [05] Worker will connect to repo at ${DEADLINE_REPO_IP}:4433 over ZeroTier"
+# ── CloudWatch shim scripts ──────────────────────────────────────────────────
+# Portal user-data may call these helpers. If the Deadline installer did not
+# create them, provide no-op shims so the boot sequence does not fail.
+
+CW_SETUP_BIN="/opt/Thinkbox/CloudWatchSetup/bin"
+CW_DIR="/opt/Thinkbox/CloudWatch"
+
+mkdir -p "$CW_SETUP_BIN" "$CW_DIR"
+
+# set_awslogs_region.py — no-op shim
+CW_REGION_SCRIPT="${CW_SETUP_BIN}/set_awslogs_region.py"
+if [[ ! -f "$CW_REGION_SCRIPT" ]]; then
+    cat > "$CW_REGION_SCRIPT" << 'PYEOF'
+#!/usr/bin/env python3
+"""No-op shim: Portal does not use CloudWatch agent configuration."""
+pass
+PYEOF
+    chmod +x "$CW_REGION_SCRIPT"
+fi
+
+# add_awslogs_stream_name_prefix.py — no-op shim
+CW_PREFIX_SCRIPT="${CW_SETUP_BIN}/add_awslogs_stream_name_prefix.py"
+if [[ ! -f "$CW_PREFIX_SCRIPT" ]]; then
+    cat > "$CW_PREFIX_SCRIPT" << 'PYEOF'
+#!/usr/bin/env python3
+"""No-op shim: Portal does not use CloudWatch agent configuration."""
+pass
+PYEOF
+    chmod +x "$CW_PREFIX_SCRIPT"
+fi
+
+# on_instance_init.sh — no-op shim
+CW_INIT_SCRIPT="${CW_DIR}/on_instance_init.sh"
+if [[ ! -f "$CW_INIT_SCRIPT" ]]; then
+    cat > "$CW_INIT_SCRIPT" << 'BASHEOF'
+#!/usr/bin/env bash
+# No-op shim: Portal does not use CloudWatch on-instance init.
+exit 0
+BASHEOF
+    chmod +x "$CW_INIT_SCRIPT"
+fi
+
+echo "==> [05] Deadline Worker ${DEADLINE_VERSION} installed (service disabled, Portal-ready)"
+echo "==> [05] Connection: Remote with empty ProxyRoot — Portal user-data configures at launch"

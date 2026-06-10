@@ -1,31 +1,98 @@
 #!/usr/bin/env bash
 # 02_nvidia_drivers.sh
-# Install NVIDIA data center driver (535+) for L40S on Ubuntu 22.04.
-# Requires a reboot after 01_system_prep.sh (Nouveau must be disabled first).
+# Download and install NVIDIA R550 datacenter driver from S3 for AL2023 + L40S.
+# Preconditions: 01_system_prep.sh completed, S3_BUCKET and AWS_REGION set,
+# nouveau blacklisted, reboot recommended before nvidia-smi will function.
 
 LOG=/var/log/ami-build.log
 exec >> "$LOG" 2>&1
 set -euo pipefail
 
-echo "==>"
+echo "==> [02] NVIDIA driver install started at $(date)"
 
-DRIVER_VERSION="535-server"
+DRIVER_FILE="NVIDIA-Linux-x86_64-550.163.01.run"
+DRIVER_PATH="/tmp/${DRIVER_FILE}"
 
-# Use Ubuntu repos' -server driver (DKMS-built for HWE kernels like 6.8.x-aws).
-# The CUDA repo's nvidia-driver-535 conflicts with kernel 6.8 on Jammy.
-apt-get update -y
-apt-get install -y \
-    nvidia-driver-${DRIVER_VERSION} \
-    nvidia-utils-${DRIVER_VERSION}
+# ── Idempotency: skip if nvidia kernel module already loaded ──
+if command -v nvidia-smi &>/dev/null; then
+    echo "==> [02] nvidia-smi already present — skipping install"
+    exit 0
+fi
 
-# Verify driver is loadable (won't show GPU without reboot, but package must install cleanly)
-dpkg -l | grep -E "nvidia-driver-${DRIVER_VERSION}" | grep -q "^ii" || {
-    echo "ERROR: NVIDIA driver package not installed correctly"
+# ── Verify required environment variables ──
+if [[ -z "${S3_BUCKET:-}" ]]; then
+    echo "ERROR: S3_BUCKET environment variable not set"
     exit 1
-}
+fi
+if [[ -z "${AWS_REGION:-}" ]]; then
+    echo "ERROR: AWS_REGION environment variable not set"
+    exit 1
+fi
 
-# Persistence daemon for reduced latency on first GPU call
-# May fail if already enabled or not installed — non-fatal
-systemctl enable nvidia-persistenced || true
+# ── Install build dependencies for NVIDIA kernel module ──
+echo "==> [02] Installing kernel headers and build tools"
+KERNEL_VER="$(uname -r)"
+dnf install -y \
+    gcc \
+    make \
+    "kernel-devel-${KERNEL_VER}" \
+    elfutils-libelf-devel
+
+# ── Blacklist nouveau (AL2023 uses dracut) ──
+NOUVEAU_CONF="/etc/modprobe.d/blacklist-nouveau.conf"
+if [[ -f "${NOUVEAU_CONF}" ]]; then
+    echo "==> [02] nouveau blacklist already exists — verifying content"
+    if ! grep -q "^blacklist nouveau$" "${NOUVEAU_CONF}" \
+       || ! grep -q "^options nouveau modeset=0$" "${NOUVEAU_CONF}"; then
+        echo "WARN: ${NOUVEAU_CONF} exists but content unexpected — overwriting"
+        cat > "${NOUVEAU_CONF}" << 'EOF'
+blacklist nouveau
+options nouveau modeset=0
+EOF
+        dracut --force
+    fi
+else
+    echo "==> [02] Creating nouveau blacklist and rebuilding initramfs"
+    cat > "${NOUVEAU_CONF}" << 'EOF'
+blacklist nouveau
+options nouveau modeset=0
+EOF
+    dracut --force
+fi
+
+# ── Download NVIDIA driver from S3 ──
+echo "==> [02] Downloading ${DRIVER_FILE} from s3://${S3_BUCKET}/installers/"
+aws s3 cp "s3://${S3_BUCKET}/installers/${DRIVER_FILE}" "${DRIVER_PATH}" \
+    --region "${AWS_REGION}"
+
+if [[ ! -f "${DRIVER_PATH}" ]]; then
+    echo "ERROR: Driver file not found after download: ${DRIVER_PATH}"
+    exit 1
+fi
+
+# ── Silent unattended install ──
+echo "==> [02] Running NVIDIA driver silent install"
+sh "${DRIVER_PATH}" --silent --no-cc-version-check
+
+# ── Verify install ──
+if ! command -v nvidia-smi &>/dev/null; then
+    echo "ERROR: nvidia-smi not found after install"
+    exit 1
+fi
+echo "==> [02] nvidia-smi binary verified at $(command -v nvidia-smi)"
+
+# ── Enable nvidia-persistenced for reduced latency on first GPU call ──
+# Non-fatal — may fail if service not available in this driver version
+if systemctl cat nvidia-persistenced &>/dev/null; then
+    systemctl enable nvidia-persistenced || {
+        RET=$?
+        echo "WARN: nvidia-persistenced enable failed (exit ${RET}) — non-fatal"
+    }
+else
+    echo "==> [02] nvidia-persistenced service not found — skipping"
+fi
+
+# ── Cleanup ──
+rm -f "${DRIVER_PATH}"
 
 echo "==> [02] NVIDIA driver install complete — reboot required before nvidia-smi will work"

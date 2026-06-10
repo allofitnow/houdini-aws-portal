@@ -1,50 +1,123 @@
 #!/usr/bin/env bash
 # 01_system_prep.sh
-# System update, build dependencies, and disable Nouveau GPU driver.
-# Must be run as root on a fresh Ubuntu 22.04 instance.
+# System update, build/runtime dependencies, X11/GL/audio libs, Portal shims.
+# Must be run as root on a fresh Amazon Linux 2023 instance.
 
 LOG=/var/log/ami-build.log
 exec >> "$LOG" 2>&1
 set -euo pipefail
 
-echo "==>"
+echo "==> [01] System prep started at $(date)"
 
-export DEBIAN_FRONTEND=noninteractive
+# ── System update ────────────────────────────────────────────────────────────
+dnf update -y
 
-apt-get update -y
-apt-get upgrade -y
-apt-get install -y \
-    build-essential \
-    dkms \
-    "linux-headers-$(uname -r)" \
-    curl \
-    wget \
-    unzip \
-    jq \
+# ── Build dependencies (for NVIDIA driver compile) ──────────────────────────
+dnf install -y \
+    gcc \
+    make \
+    "kernel-devel-$(uname -r)" \
+    elfutils-libelf-devel
+
+# ── Runtime dependencies ────────────────────────────────────────────────────
+dnf install -y \
+    python3 \
     python3-pip \
-    awscli \
-    ca-certificates \
-    gnupg \
-    lsb-release \
-    libxkbcommon0 \
-    libxkbcommon-x11-0 \
-    libxcb-cursor0 \
-    libxcb-icccm4 \
-    libxcb-image0 \
-    libxcb-keysyms1 \
-    libxcb-render-util0 \
-    libxcb-shape0 \
-    libxcb-randr0 \
-    libxcb-xfixes0 \
-    libxcb-xinerama0 \
-    libxss1
+    tar \
+    gzip \
+    wget \
+    curl \
+    java-11-amazon-corretto-headless \
+    jq \
+    unzip \
+    awscli
 
-# Disable Nouveau (conflicts with NVIDIA data center driver)
-cat > /etc/modprobe.d/blacklist-nouveau.conf << 'EOF'
+# ── X11 / GL libraries (Houdini UI and rendering) ───────────────────────────
+dnf install -y \
+    libXext \
+    libX11 \
+    libXmu \
+    libXi \
+    libXt \
+    libXinerama \
+    libXrandr \
+    libXcursor \
+    libXfixes \
+    libXrender \
+    libXScrnSaver \
+    libSM \
+    libICE \
+    mesa-libGLU \
+    mesa-libGL
+
+# ── Audio ────────────────────────────────────────────────────────────────────
+dnf install -y \
+    alsa-lib
+
+# ── Fonts ────────────────────────────────────────────────────────────────────
+dnf install -y \
+    liberation-sans-fonts \
+    liberation-serif-fonts \
+    liberation-mono-fonts
+
+# ── Misc libraries ───────────────────────────────────────────────────────────
+dnf install -y \
+    ncurses-compat-libs \
+    libxcb \
+    libxkbcommon
+
+# ── Portal shim: python → python3 symlink ────────────────────────────────────
+# Portal user-data and Deadline helpers expect /usr/bin/python to exist.
+if [[ ! -e /usr/bin/python ]]; then
+    ln -sf /usr/bin/python3 /usr/bin/python
+fi
+
+# ── Portal shim: no-op awslogs systemd service ──────────────────────────────
+# Portal user-data runs 'sudo service awslogs stop/start'. Provide a benign
+# oneshot unit so those commands succeed without installing the full agent.
+if [[ ! -f /etc/systemd/system/awslogs.service ]]; then
+    cat > /etc/systemd/system/awslogs.service << 'AWSEOF'
+[Unit]
+Description=AWS Logs shim (no-op for Portal AMI)
+DefaultDependencies=no
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+ExecStop=/bin/true
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+AWSEOF
+    systemctl daemon-reload
+    systemctl enable awslogs.service
+fi
+
+# ── Portal shim: chkconfig compatibility ─────────────────────────────────────
+# Some Portal helper scripts call 'chkconfig'. Symlink to systemctl on AL2023.
+if [[ ! -e /sbin/chkconfig ]]; then
+    ln -sf /usr/bin/systemctl /sbin/chkconfig
+fi
+
+# ── Ensure ec2-user home and .aws directory ──────────────────────────────────
+if ! getent passwd ec2-user >/dev/null 2>&1; then
+    useradd -m -s /bin/bash ec2-user
+fi
+mkdir -p /home/ec2-user/.aws
+chown -R ec2-user:ec2-user /home/ec2-user/.aws
+
+# ── Blacklist Nouveau (conflicts with NVIDIA data center driver) ─────────────
+if [[ ! -f /etc/modprobe.d/blacklist-nouveau.conf ]]; then
+    cat > /etc/modprobe.d/blacklist-nouveau.conf << 'NOUVEAUEOF'
 blacklist nouveau
 options nouveau modeset=0
-EOF
+NOUVEAUEOF
+fi
+dracut --force
 
-update-initramfs -u
+# ── Clean up ─────────────────────────────────────────────────────────────────
+dnf clean all
 
 echo "==> [01] System prep complete"
