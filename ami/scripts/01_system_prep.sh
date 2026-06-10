@@ -38,39 +38,29 @@ dnf install -y --allowerasing \
     unzip \
     awscli
 
-# ── X11 / GL libraries (Houdini UI and rendering) ───────────────────────────
+# ── GNOME Desktop (Xorg + all X11/GL/audio/font libraries for Houdini) ───────
+# AL2023 "Desktop" group installs GNOME + Xorg + hundreds of libs including
+# libOpenGL, libEGL, all X11 extensions, audio (alsa/PulseAudio), and fonts.
+# Individual package installs below are no longer needed after this.
+echo "==> [01] Installing GNOME Desktop group (X11 + display server for Houdini)"
+dnf groupinstall -y "Desktop"
+
+# ── Additional GL/EGL libraries (may already be satisfied by Desktop group) ──
 dnf install -y \
-    libXext \
-    libX11 \
-    libXmu \
-    libXi \
-    libXt \
-    libXinerama \
-    libXrandr \
-    libXcursor \
-    libXfixes \
-    libXrender \
-    libXScrnSaver \
-    libSM \
-    libICE \
+    libglvnd-opengl \
+    libglvnd-egl \
+    mesa-libEGL \
     mesa-libGLU \
-    mesa-libGL
+    ncurses-compat-libs
 
-# ── Audio ────────────────────────────────────────────────────────────────────
-dnf install -y \
-    alsa-lib
+# ── Stack size fix (Houdini warns about 10MB default) ────────────────────────
+grep -q 'soft stack unlimited' /etc/security/limits.conf 2>/dev/null || {
+    echo "* soft stack unlimited" >> /etc/security/limits.conf
+    echo "* hard stack unlimited" >> /etc/security/limits.conf
+}
 
-# ── Fonts ────────────────────────────────────────────────────────────────────
-dnf install -y \
-    liberation-sans-fonts \
-    liberation-serif-fonts \
-    liberation-mono-fonts
-
-# ── Misc libraries ───────────────────────────────────────────────────────────
-dnf install -y \
-    ncurses-compat-libs \
-    libxcb \
-    libxkbcommon
+# ── Keep runlevel at multi-user (no auto-GUI; DCV/VNC provides display) ──────
+systemctl set-default multi-user.target
 
 # ── Portal shim: python → python3 symlink ────────────────────────────────────
 # Portal user-data and Deadline helpers expect /usr/bin/python to exist.
