@@ -20,7 +20,7 @@ dnf install -y \
     elfutils-libelf-devel
 
 # ── Runtime dependencies ────────────────────────────────────────────────────
-dnf install -y \
+dnf install -y --allowerasing \
     python3 \
     python3-pip \
     tar \
