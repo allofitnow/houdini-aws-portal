@@ -54,7 +54,7 @@ fi
 
 # Check for idle workers
 # Portal workers may be in any pool; check "none" first (default), then all workers
-IDLE_WORKERS=$(deadlinecommand -GetSlavesInPool "none" 2>/dev/null | grep -c "Idle" || true)
+IDLE_WORKERS=$(deadlinecommand -GetSlaveNamesInPool "none" 2>/dev/null | grep -c "Idle" || true)
 if [[ "$IDLE_WORKERS" -eq 0 ]]; then
     # Broader check — any idle worker regardless of pool
     IDLE_WORKERS=$(deadlinecommand -GetSlaveNames 2>/dev/null | wc -l || true)
@@ -66,7 +66,7 @@ fi
 echo "Idle workers detected: $IDLE_WORKERS" | tee -a "$LOG"
 
 # --- Submit job ---
-# deadlinecommand -SubmitJob uses a job info file + plugin info file.
+# deadlinecommand -SubmitJobAndNotify uses a job info file + plugin info file.
 # For Houdini, we create temp files with the job parameters.
 
 JOB_INFO=$(mktemp)
@@ -95,7 +95,7 @@ echo "Submitting Houdini Karma test job..." | tee -a "$LOG"
 echo "  Scene: $SCENE" | tee -a "$LOG"
 echo "  Output: $OUT_NODE" | tee -a "$LOG"
 
-JOB_ID=$(deadlinecommand -SubmitJob "$JOB_INFO" "$PLUGIN_INFO" Houdini 2>&1 | head -1) || {
+JOB_ID=$(deadlinecommand -SubmitJobAndNotify "$JOB_INFO" "$PLUGIN_INFO" Houdini 2>&1 | head -1) || {
     echo "FATAL: Job submission failed" | tee -a "$LOG"
     exit 3
 }
@@ -104,7 +104,7 @@ echo "Job submitted: $JOB_ID" | tee -a "$LOG"
 # --- Poll until complete ---
 ELAPSED=0
 while [[ $ELAPSED -lt $TIMEOUT ]]; do
-    STATUS=$(deadlinecommand -GetJobStatus "$JOB_ID" 2>/dev/null || echo "Unknown")
+    STATUS=$(deadlinecommand -GetJobSetting "$JOB_ID" Status 2>/dev/null || echo "Unknown")
     echo "  [$ELAPSED/${TIMEOUT}s] Job $JOB_ID status: $STATUS" | tee -a "$LOG"
 
     case "$STATUS" in
@@ -112,7 +112,7 @@ while [[ $ELAPSED -lt $TIMEOUT ]]; do
             echo "==> Job COMPLETED successfully at $(date)" | tee -a "$LOG"
 
             # Verify output files exist (via deadlinecommand or SSH)
-            ERROR_COUNT=$(deadlinecommand -GetJobErrorCount "$JOB_ID" 2>/dev/null || echo "0")
+            ERROR_COUNT=$(deadlinecommand -GetJobErrorReportFilenames "$JOB_ID" 2>/dev/null | wc -l || echo "0")
             echo "  Error reports: $ERROR_COUNT" | tee -a "$LOG"
 
             if [[ "$ERROR_COUNT" -gt 0 ]]; then
@@ -125,7 +125,7 @@ while [[ $ELAPSED -lt $TIMEOUT ]]; do
         Failed|Error)
             echo "==> Job FAILED at $(date)" | tee -a "$LOG"
             echo "  Fetching error report..." | tee -a "$LOG"
-            deadlinecommand -GetJobErrors "$JOB_ID" 2>/dev/null | head -50 | tee -a "$LOG"
+            deadlinecommand -GetJobErrorReportFilenames "$JOB_ID" 2>/dev/null | head -50 | tee -a "$LOG"
             exit 1
             ;;
         Rendering|Queued|Pending|Suspended)
