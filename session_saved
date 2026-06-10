@@ -1,0 +1,192 @@
+# Session Log — 2026-05-30
+# houdini-aws-portal: Issue cleanup, WSL bug fixes, AWS Portal infrastructure diagnosis
+
+## Phase 1: Project Status Review
+
+Read wiki page GPU-Capacity-Scout-and-AWS-Portal-Fleet-Launcher and activated project houdini-aws-portal via Serena MCP.
+
+Context from prior session (compacted):
+- All M5–M8 milestones (GPU Capacity Scout + Fleet Launcher) were CLOSED
+- 16 files, ~6,763 lines of Bash delivered across 4 orchestrators + 12 libraries
+- 25 GitLab labels created (15 fsm:: + 10 classification)
+- Wiki page FSM-Board-Setup created
+- HEAD: 6ae7209 (pushed to master)
+
+Open issues remaining from pre-M5: #41, #42, #43, #44, #45, #46
+Active milestones: M3 (AMI Build), M4 (Portal Go-Live)
+
+---
+
+## Phase 2: Close Stale Issues
+
+All 6 pre-M5 scriptable issues were already covered by existing implementations:
+
+### #45 — Document GPU capacity scout and AWS Portal fleet launcher tool
+- CLOSED — wiki page GPU-Capacity-Scout-and-AWS-Portal-Fleet-Launcher already exists
+- Served as the source specification for M5–M8 (issues #47–#63, all closed)
+- Comment added with closing rationale
+
+### #43 — Add script for Deadline Cloud UBL endpoint creation after AWS Portal infrastructure
+- CLOSED — covered by:
+  - `aws/create_ubl_endpoint.sh` (328 lines) — Portal VPC discovery, UBL endpoint creation/reuse
+  - `aws/lib/ubl_check.sh` (406 lines, M6 issue #56) — UBL endpoint and Secrets Manager validation
+- Both handle Portal VPC discovery, Deadline Cloud license endpoint creation/reuse, SideFX metered product attachment, SG self-ingress, and Secrets Manager DNS update
+
+### #44 — Document AWS Portal and AWS platform workflow interactions
+- CLOSED — wiki page AWS-Portal-and-AWS-Platform-Workflow already exists
+- Covers all scope: infrastructure setup, Elastic IP/Gateway/VPC/S3/CloudFormation tracking, Deadline Cloud UBL endpoint creation, Spot Fleet worker placement, AZ/capacity considerations, verification commands, AND Mermaid sequence diagram with dark background fills
+
+### #41 — Add single command to cleanly stop all AWS Portal infrastructure
+- CLOSED — `aws/cleanup_all_infrastructure.sh` (178 lines) already implements this:
+  - Terminates manual deadline-worker instances via `terminate_spot_worker.sh --all`
+  - Cancels Portal Spot Fleet requests
+  - Deletes Portal CloudFormation stacks via `portal_infra.sh stop`
+  - Supports multi-region via `--regions r1,r2`
+  - Defaults to dry-run, requires `--yes` for mutations
+
+### #42 — Complete generic AWS Portal infrastructure creation workflow
+- CLOSED — documented in wiki page AWS-Portal-and-AWS-Platform-Workflow
+- Covers operator flow, cert/UBL sync paths, success criteria, verification commands
+- `portal_infra.sh start` provides guided setup
+
+### #46 — Terminate current AWS Portal resources while capacity scout tool is built
+- CLOSED — GPU capacity scout tool is now complete (M5–M8)
+- Tooling exists: `cleanup_all_infrastructure.sh --yes --regions us-west-2`
+- Operational task requiring live AWS credentials
+
+---
+
+## Phase 3: Shellcheck Pre-M5 Scripts
+
+Ran shellcheck on all 9 pre-M5 scripts:
+- `aws/launch_spot_worker.sh`
+- `aws/launch_ready_spot_worker.sh`
+- `aws/terminate_spot_worker.sh`
+- `aws/portal_infra.sh`
+- `aws/create_ubl_endpoint.sh`
+- `aws/create_ami.sh`
+- `aws/launch_build_instance.sh`
+- `aws/setup_desktop.sh`
+- `aws/cleanup_all_infrastructure.sh`
+
+Result: 1 warning — SC1090 in `aws/setup_desktop.sh` line 42 (non-constant source).
+
+Fix: Added `# shellcheck source=/dev/null` directive before the source line.
+
+Committed and pushed:
+```
+c2773ff style: fix SC1090 in setup_desktop.sh (#shellcheck)
+```
+
+---
+
+## Phase 4: Integration Review
+
+Reviewed `aws/launch_ready_spot_worker.sh` (647 lines) — the CLI-only worker launch path.
+
+Conclusion: Two parallel worker launch paths exist by design:
+1. **CLI path** (existing): `launch_ready_spot_worker.sh` — single worker, multi-region fallback, SSM provisioning, ZeroTier + Deadline registration. Works without Portal plugin.
+2. **Portal path** (new M5–M8): `scan_gpu_capacity.sh` → `prepare_portal_region.sh` → `launch_portal_worker_fleet.sh` → `watch_worker_fleet.sh`. API-driven fleet launch reusing Portal infrastructure, GitLab FSM workflow tracking.
+
+No merge/refactoring warranted — they serve different use cases.
+
+Updated #9 tracker with full project status comment.
+
+---
+
+## Phase 5: WSL Remote — Code Sync and Bug Fixes
+
+Connected to 192.168.30.231 (WSL Ubuntu on Windows host ATXRTX).
+
+Found uncommitted changes — real bug fixes from local testing:
+- shellcheck source= paths corrected (aws/lib/ prefix)
+- instance_offerings: space-to-comma filter values for describe-instance-type-offerings
+- quota_check: awk-based floating point arithmetic for headroom calc
+- spot_pricing: remove trailing backslash continuations in jq expression
+- scan_gpu_capacity: pass --target-capacity to query_spot_scores
+- .gitattributes for LF normalization
+
+Committed and pushed:
+```
+de21654 fix: runtime bug fixes from WSL testing
+  - shellcheck source= paths corrected (aws/lib/ prefix)
+  - instance_offerings: space-to-comma filter values for describe-instance-type-offerings
+  - quota_check: awk-based floating point arithmetic for headroom calc
+  - spot_pricing: remove trailing backslash continuations in jq expression
+  - scan_gpu_capacity: pass --target-capacity to query_spot_scores
+  - add .gitattributes for LF normalization
+```
+
+---
+
+## Phase 6: AWS Portal Infrastructure Diagnosis
+
+### Environment discovered on 192.168.30.231
+
+**Deadline 10.4.2.3 installation:**
+- Client: `/mnt/c/Program Files/Thinkbox/Deadline10/`
+- Repository: `/mnt/c/DeadlineRepository10/`
+- Config: `/mnt/c/Users/aoin/AppData/Local/Thinkbox/Deadline10/deadline.ini`
+- RCS: running at `192.168.30.141:4433`
+- Portal Link: installed at `C:\Program Files (x86)\Thinkbox\AWSPortalLink\` — running, SSH tunnels connect
+- Asset Server: installed at `C:\Program Files (x86)\Thinkbox\AWSPortalAssetServer\` — healthy, IP 192.168.30.141
+- AWS Portal event plugin: installed at `/mnt/c/DeadlineRepository10/events/AWSPortal/` (AWSPortal.py, AWSPortalUtils.py, AWSPortal.param)
+- Portal UI (Configure AWS Portal): NOT found as separate plugin — built into Deadline Monitor
+
+**Two AWS IAM users:**
+- `howong` (AKIA3IVQXN7JDFEDQH6Y) — in `admin` group, used by Deadline Monitor/AWS Portal
+- `deadline-portal` (AKIA3IVQXN7JKYR6UKE7) — restricted, used by CLI scripts
+
+**AWS Portal state:**
+- `portal_infra.sh status` → clean slate, no Portal stacks, no Gateway, no workers, no Spot Fleets
+- `DeadlineResourceTracker` CFN stack: CREATE_COMPLETE, v11.6.1
+- No leftover infrastructure
+
+### Root Cause: Empty Portal Cache S3 Bucket
+
+Monitor log (`deadlinemonitor-ATXRTX-2026-05-30-0009.log`) shows:
+```
+Using a custom ReverseDash.template from https://aws-portal-cache-5e77a4fe-5e27-4ea9-83e8-8c330a2bc590.s3.us-west-2.amazonaws.com/Release/ReverseDash.template
+System.Net.WebException: The remote server returned an error: (403) Forbidden.
+```
+
+Investigation:
+- Bucket `aws-portal-cache-5e77a4fe-5e27-4ea9-83e8-8c330a2bc590` EXISTS in us-west-2
+- Bucket is EMPTY — zero objects (confirmed via `s3api list-objects-v2`)
+- `s3api get-object` returns `NoSuchKey` (not AccessDenied)
+- Three template files missing:
+  - `Release/ReverseDash.template` — main Portal VPC/Gateway CFN template
+  - `Release/PrivateSubnet.template` — per-AZ subnet template
+  - `Release/amis.json` — AMI mapping file
+- No template files found anywhere on disk (searched Program Files, ProgramData, AppData)
+- Templates are embedded in the Deadline Monitor .NET assembly and should be uploaded during "Configure AWS Portal"
+
+### Fix Options
+
+1. **Re-run Configure AWS Portal** in Deadline Monitor (Tools → Configure AWS Portal) — re-enter AWS credentials; this should re-extract and upload the templates to the cache bucket
+2. **Manual template extraction** from the Deadline assembly and upload to `s3://aws-portal-cache-5e77a4fe-5e27-4ea9-83e8-8c330a2bc590/Release/`
+3. After templates are in the bucket, "Start Infrastructure" should work
+
+---
+
+## Project Totals (end of session)
+
+- **9,306 lines** of Bash across **25 files**
+- **10 wiki** pages
+- **25 GitLab** labels (15 FSM + 10 classification)
+- **8 milestones** M1–M8 — all closed
+- **All scriptable issues closed** (#1–#63)
+- **HEAD**: `de21654` (pushed to master)
+
+**Remaining open issues** (4 — manual/GUI only):
+- #9 — M4 Go-Live tracker (updated with full status)
+- #26 — Configure AWS Portal in Deadline Monitor
+- #27 — Karma XPU test render ← next action item
+- #35 — Install legacy Portal plugin (deferred)
+
+**Key files on 192.168.30.231:**
+- `.env` — AWS creds, subnet IDs, SG IDs
+- `deadline.ini` — AWS Portal config, template URLs, RCS connection
+- Portal Link logs: `/mnt/c/ProgramData/Thinkbox/AWSPortalLink/`
+- Asset Server logs: `/mnt/c/ProgramData/Thinkbox/AWSPortalAssetServer/logs/`
+- Deadline Monitor logs: `/mnt/c/ProgramData/Thinkbox/Deadline10/logs/`

@@ -2,7 +2,7 @@
 # Wrapper to run step 05 via SSM - writes the actual script to instance then executes
 # This avoids quoting hell with SSM parameters
 
-export S3_BUCKET="renderfarm-installers-774538489810"
+export S3_BUCKET="deadline-houdini-installers"
 export DEADLINE_REPO_IP="10.147.18.89"
 export AWS_REGION="us-west-2"
 DEADLINE_VERSION="10.4.2.3"

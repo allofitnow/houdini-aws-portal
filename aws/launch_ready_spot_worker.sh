@@ -36,7 +36,7 @@
 #   DEADLINE_RCS_ZT_IP=10.147.18.89
 #   DEADLINE_RCS_PORT=4433
 #   ZT_NETWORK_ID=d3ecf5726d14ac76
-#   CERT_BUCKET=renderfarm-installers-774538489810
+#   CERT_BUCKET=deadline-houdini-installers
 #   CERT_BUCKET_REGION=us-east-1
 #   CERT_PREFIX=tmp/deadline-certs
 #   SSH_PUBLIC_KEYS_FILE=~/.ssh/authorized_keys  (or set SSH_PUBLIC_KEYS directly)
@@ -76,7 +76,7 @@ DEADLINE_WORKER_SG_NAME="${DEADLINE_WORKER_SG_NAME:-deadline-worker-sg}"
 
 # S3 bucket/prefix used to stage certificates so SSM can pull them without
 # embedding binary/base64 data inline in CLI parameters.
-CERT_BUCKET="${CERT_BUCKET:-renderfarm-installers-774538489810}"
+CERT_BUCKET="${CERT_BUCKET:-deadline-houdini-installers}"
 CERT_BUCKET_REGION="${CERT_BUCKET_REGION:-us-east-1}"
 CERT_PREFIX="${CERT_PREFIX:-tmp/deadline-certs}"
 # Set to "true" to also install GNOME + Amazon DCV on each worker.

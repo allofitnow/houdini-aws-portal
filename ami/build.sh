@@ -13,7 +13,7 @@
 #     --license-endpoint-secret-id <SECRET_ID>
 #
 # Example:
-#   sudo bash build.sh --repo-ip 10.147.20.5 --s3-bucket renderfarm-installers \
+#   sudo bash build.sh --repo-ip 10.147.20.5 --s3-bucket deadline-houdini-installers \
 #                      --houdini-build 506 --b2-bucket renders-allofitnow \
 #                      --aws-region us-west-2
 

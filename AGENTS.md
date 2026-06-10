@@ -1,9 +1,10 @@
 # houdini-aws-portal — Agent Rules
 
 This project builds a custom AWS EC2 AMI for bursting Houdini 21.0 render jobs
-via Thinkbox Deadline 10.4.2.3 AWS Portal. Workers use Ubuntu 22.04, NVIDIA L40S
-GPUs (g6e.4xlarge), ZeroTier networking, Deadline Cloud UBL licensing, and
-Backblaze B2 storage via rclone.
+via Thinkbox Deadline 10.4.2.3 AWS Portal. Workers use Amazon Linux 2023 (AL2023),
+NVIDIA L40S GPUs (g6e.4xlarge), Deadline Cloud UBL licensing, and Portal Asset
+Server for output delivery. (Prior builds used Ubuntu 22.04 + ZeroTier + B2/rclone;
+that on-prem path is retained in deprecated/ scripts for reference only.)
 
 Full standards reference: [[Standards-and-Conventions]] wiki page.
 
@@ -50,8 +51,7 @@ Never use `|| true` to suppress errors without a comment explaining why.
 - **Never commit** `.env`, `*.pem`, or any file containing live secrets
 - Runtime secrets live in **AWS Secrets Manager** under `service/key-name`:
   - `houdini/license-endpoint-dns`
-  - `backblaze/b2-key-id`, `backblaze/b2-app-key`
-  - `zerotier/api-token`
+  - Portal builds: only this secret is needed (ZeroTier/B2 secrets unused)
 - Boot scripts fetch secrets at runtime using:
   ```bash
   SECRET=$(aws secretsmanager get-secret-value \
@@ -71,7 +71,7 @@ Never use `|| true` to suppress errors without a comment explaining why.
 
 | Thing | Pattern | Example |
 |---|---|---|
-| AMI | `deadline-<DL>-houdini-<HOU>-ubuntu<OS>-<GPU>-v<N>` | `deadline-10.4.2.3-houdini-21.0-ubuntu22-l40s-v1` |
+| AMI | `deadline-<DL>-houdini-<HOU>-<OS>-<GPU>-v<N>` | `deadline-10.4.2.3-houdini-21.0-al2023-l40s-v1` |
 | Build script | `NN_name.sh` zero-padded | `04_houdini.sh` |
 | Security group | `deadline-<purpose>-sg` | `deadline-ami-build-sg` |
 | IAM role | `deadline-<purpose>-role` | `deadline-worker-role` |
@@ -83,8 +83,10 @@ Never use `|| true` to suppress errors without a comment explaining why.
 
 Services must declare `After=` in this order:
 ```
-zerotier-one → houdini-ubl → rclone-b2-renders → deadline10launcher
+houdini-ubl → deadline10launcher
 ```
+(Prior on-prem builds had zerotier-one and rclone-b2-renders in the chain;
+Portal builds remove both — workers connect to RCS directly via VPC.)
 
 Boot init scripts go in `/usr/local/sbin/` with mode `700`.
 
@@ -112,8 +114,8 @@ When creating or updating issues:
 |---|---|
 | `nvidia-smi` missing | Reboot after `02_nvidia_drivers.sh`; `lsmod \| grep nouveau` |
 | Houdini license error | `cat /etc/profile.d/houdini-license.sh`; verify secret not PENDING |
-| ZeroTier `REQUESTING_CONFIGURATION` | Authorize node at my.zerotier.com/network/d3ecf5726d14ac76 |
-| B2 not mounted | `journalctl -u rclone-b2-renders.service` |
-| Worker missing from Monitor | ZeroTier must be `OK PRIVATE` first |
+| Portal user-data fails | `cat /var/log/cloud-init-output.log`; check `awslogs` shim and `python` symlink |
+| Worker missing from Monitor | Check security group allows outbound to RCS port 4433; verify UBL endpoint is READY |
+| `chkconfig awslogs` errors | Verify systemd unit exists; `systemctl status awslogs` |
 
 Build log: `grep "==>" /var/log/ami-build.log` for step timeline.
