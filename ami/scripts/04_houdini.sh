@@ -59,13 +59,14 @@ INSTALLER_DIR=$(find "$TMP_DIR" -maxdepth 1 -type d -name "houdini-*" | head -1)
 echo "source ${INSTALL_DIR}/houdini_setup" > /etc/profile.d/houdini.sh
 chmod +x /etc/profile.d/houdini.sh
 
-# Verify headless render binary. houdini_setup may not exist during dry-run review — non-fatal.
-# shellcheck source=/dev/null
-source "${INSTALL_DIR}/houdini_setup" 2>/dev/null || true  # tolerates missing file during image review
-hython --version || {
-    echo "ERROR: hython not found after Houdini install"
+# Verify Houdini binary exists. We cannot run hython --version here because
+# (a) no license server is configured yet, and (b) hython may hang waiting
+# for one. The UBL boot script configures the license at runtime.
+if [[ ! -x "${INSTALL_DIR}/bin/hython" ]]; then
+    echo "ERROR: hython binary not found at ${INSTALL_DIR}/bin/hython"
     exit 1
-}
+fi
+echo "==> [04] hython binary verified at ${INSTALL_DIR}/bin/hython"
 
 # --- Deadline Cloud UBL licensing ---
 # Write a boot-time service that fetches the Deadline Cloud license endpoint
