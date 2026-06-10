@@ -47,12 +47,34 @@ else
     rm -rf "${TMP_DIR}"
 fi
 
-# ── Disable launcher service — Portal user-data starts it after config ───────
-# May fail if unit not yet loaded on first install — non-fatal.
-systemctl disable deadline10launcher.service 2>/dev/null || true
+# ── Create systemd service unit if installer didn't ──────────────────────────
+# The Deadline Linux installer sometimes fails to create a systemd unit on
+# AL2023 (only creates SysV init scripts). Create it explicitly.
+SERVICE_FILE="/etc/systemd/system/deadline10launcher.service"
+if [[ ! -f "$SERVICE_FILE" ]]; then
+    cat > "$SERVICE_FILE" << 'UNIT'
+[Unit]
+Description=Deadline 10 Launcher
+After=houdini-ubl.service network-online.target
+Wants=network-online.target
 
-# ── Systemd override: boot after UBL and network ────────────────────────────
-# Portal builds have no ZeroTier and no rclone — only UBL + network-online.
+[Service]
+Type=simple
+ExecStart=/opt/Thinkbox/Deadline10/bin/deadlinelauncher
+Restart=on-failure
+RestartSec=10
+Environment=HOME=/root
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload
+    echo "==> [05] Created deadline10launcher.service systemd unit"
+else
+    echo "==> [05] deadline10launcher.service already exists"
+fi
+
+# ── Systemd override: ensure boot after UBL and network ──────────────────────
 OVERRIDE_DIR="/etc/systemd/system/deadline10launcher.service.d"
 OVERRIDE_FILE="${OVERRIDE_DIR}/override.conf"
 if [[ ! -f "$OVERRIDE_FILE" ]]; then
@@ -64,6 +86,10 @@ Wants=network-online.target
 UNIT
     systemctl daemon-reload
 fi
+
+# ── Disable launcher service — Portal user-data starts it after config ───────
+# May fail if unit not yet loaded — non-fatal.
+systemctl disable deadline10launcher.service 2>/dev/null || true
 # Service stays disabled — Portal user-data enables and starts it at launch.
 
 # ── Ensure deadline.ini has Portal-compatible defaults ───────────────────────
