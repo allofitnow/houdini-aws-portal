@@ -70,6 +70,11 @@ if [[ ! -f "${DRIVER_PATH}" ]]; then
     exit 1
 fi
 
+# ── Load DRM kernel modules required by nvidia.ko on AL2023 ──
+echo "==> [02] Loading DRM kernel modules"
+modprobe drm 2>/dev/null || echo "WARN: modprobe drm failed (may be built-in)"
+modprobe drm_kms_helper 2>/dev/null || echo "WARN: modprobe drm_kms_helper failed (may be built-in)"
+
 # ── Silent unattended install ──
 echo "==> [02] Running NVIDIA driver silent install"
 sh "${DRIVER_PATH}" --silent --no-cc-version-check
