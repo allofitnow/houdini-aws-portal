@@ -2,11 +2,11 @@
 # submit_test_render.sh — Submit a Houdini Karma test job to Deadline and poll until complete.
 #
 # Purpose: End-to-end validation of a Portal-ready AMI. Runs from the workstation
-#          (MWMSIWIN10 or any machine with deadlinecommand on PATH). Submits a
+#          (the Deadline host or any machine with deadlinecommand on PATH). Submits a
 #          single-frame Karma render, polls status, and reports pass/fail.
 #
 # Prerequisites:
-#   - deadlinecommand on PATH (or via SSH to MWMSIWIN10)
+#   - deadlinecommand on PATH (or via the local host)
 #   - Test scene Tester.hiplc deployed to the worker (in the AMI or S3)
 #   - At least one Portal worker in Idle state
 #   - UBL license endpoint READY
@@ -48,7 +48,7 @@ echo "==> Test render started at $(date)" | tee "$LOG"
 # --- Prerequisites ---
 if ! command -v deadlinecommand &>/dev/null; then
     echo "FATAL: deadlinecommand not found on PATH" | tee -a "$LOG"
-    echo "Run this script from MWMSIWIN10 or SSH tunnel to the Deadline Repo host."
+    echo "Run this script from the Deadline host (local WSL)."
     exit 3
 fi
 
