@@ -53,6 +53,7 @@ if ! command -v deadlinecommand &>/dev/null; then
 fi
 
 # Check for idle workers
+# Portal workers may be in any pool; check "none" first (default), then all workers
 IDLE_WORKERS=$(deadlinecommand -GetSlavesInPool "none" 2>/dev/null | grep -c "Idle" || true)
 if [[ "$IDLE_WORKERS" -eq 0 ]]; then
     # Broader check — any idle worker regardless of pool
@@ -77,7 +78,7 @@ Frames=1
 ChunkSize=1
 Name=Portal_AMI_Test_Render
 Priority=50
-Pool=
+Pool=  # Portal assigns pool at launch time; leave empty to use default
 Group=
 OutputDirectory0=/home/ec2-user/renderoutput
 OutputFilename0=Tester.karma1.0001.exr
