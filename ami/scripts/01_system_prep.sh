@@ -91,10 +91,48 @@ AWSEOF
     systemctl enable awslogs.service
 fi
 
-# ── Portal shim: chkconfig compatibility ─────────────────────────────────────
-# Some Portal helper scripts call 'chkconfig'. Symlink to systemctl on AL2023.
-if [[ ! -e /sbin/chkconfig ]]; then
-    ln -sf /usr/bin/systemctl /sbin/chkconfig
+# ── Portal shim: chkconfig wrapper ───────────────────────────────────────────
+# Portal user-data calls 'chkconfig --add <svc>' and 'chkconfig <svc> on'.
+# AL2023 has no chkconfig — provide a wrapper that translates to systemctl.
+if [[ ! -x /sbin/chkconfig ]] || [[ -L /sbin/chkconfig ]]; then
+    cat > /sbin/chkconfig << 'CHKWRAPPER'
+#!/bin/bash
+# chkconfig shim for AL2023 — translates to systemctl calls.
+# Portal user-data uses: chkconfig --add <svc>, chkconfig <svc> on/off
+case "${1:-}" in
+    --add)
+        # 'chkconfig --add <svc>' is a no-op on systemd — unit already exists
+        shift
+        systemctl daemon-reload 2>/dev/null
+        exit 0
+        ;;
+    --del|--delete)
+        shift
+        systemctl disable "${1:-}" 2>/dev/null
+        exit 0
+        ;;
+    --list)
+        systemctl list-unit-files --type=service 2>/dev/null
+        exit 0
+        ;;
+    -*)
+        # Unknown flags — ignore
+        exit 0
+        ;;
+    *)
+        # 'chkconfig <svc> on' or 'chkconfig <svc> off'
+        SVC="${1:-}"
+        ACTION="${2:-on}"
+        if [[ "$ACTION" == "on" ]]; then
+            systemctl enable "$SVC" 2>/dev/null
+        else
+            systemctl disable "$SVC" 2>/dev/null
+        fi
+        exit 0
+        ;;
+esac
+CHKWRAPPER
+    chmod +x /sbin/chkconfig
 fi
 
 # ── Ensure ec2-user home and .aws directory ──────────────────────────────────
