@@ -19,6 +19,12 @@ dnf install -y \
     "kernel-devel-$(uname -r)" \
     elfutils-libelf-devel
 
+# ── Kernel modules (AL2023 minimal AMIs omit GPU/DRM modules) ──────────────
+echo "==> [01] Installing kernel-modules-extra (DRM for NVIDIA driver)"
+dnf install -y kernel-modules-extra || {
+    echo "WARN: kernel-modules-extra install failed — NVIDIA driver may fail"
+}
+
 # ── Runtime dependencies ────────────────────────────────────────────────────
 dnf install -y --allowerasing \
     python3 \
