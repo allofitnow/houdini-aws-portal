@@ -1,0 +1,19 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ec2:Describe*",
+        "ec2:RequestSpotFleet",
+        "ec2:ModifySpotFleetRequest",
+        "ec2:CancelSpotFleetRequests",
+        "ec2:TerminateInstances",
+        "ec2:CreateTags",
+        "iam:PassRole",
+        "iam:ListRoles"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

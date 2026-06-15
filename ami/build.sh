@@ -94,6 +94,7 @@ elif lsmod | grep -q nouveau; then
 fi
 
 run_step 02_nvidia_drivers.sh
+run_step 03_zerotier.sh
 run_step 04_houdini.sh
 
 # Copy test scene to ec2-user home for validation renders
@@ -107,6 +108,7 @@ else
 fi
 
 run_step 05_deadline_worker.sh
+run_step 07_s3_output_sync.sh
 run_step 06_cleanup.sh
 
 echo ""

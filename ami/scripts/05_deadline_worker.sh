@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 # 05_deadline_worker.sh
-# Install Thinkbox Deadline 10.4.2.3 Linux Worker for AWS Portal.
-# Connects via Remote connection type with empty ProxyRoot — Portal user-data
-# sets Region=<stack-name> at runtime for Gateway discovery.
+# Install Thinkbox Deadline 10.4.2.3 Linux Worker for Spot Event Plugin.
+# Connects via Remote connection type to the ZeroTier IP of the RCS.
 # Preconditions: S3_BUCKET and AWS_REGION are exported by build.sh.
-#   Step 01 (system prep) must be complete (python symlink, ec2-user, etc.).
 
 LOG=/var/log/ami-build.log
 exec >> "$LOG" 2>&1
@@ -29,135 +27,85 @@ else
         --region "$AWS_REGION"
     chmod +x "${TMP_DIR}/${INSTALLER}"
 
-    # ── Unattended install ───────────────────────────────────────────────────
-    # Remote connection with EMPTY proxy root — Portal user-data configures the
-    # actual RCS endpoint at instance launch via Region=<stack-name>.
-    # --slavestartup false: Portal user-data enables the slave after config.
-    # --daemonuser root: Portal launcher runs as root.
     "${TMP_DIR}/${INSTALLER}" \
         --mode unattended \
         --prefix "${INSTALL_PREFIX}" \
         --connectiontype Remote \
-        --proxyrootdir "" \
+        --proxyrootdir "10.147.18.89:4433" \
         --noguimode true \
-        --slavestartup false \
+        --slavestartup true \
         --launcherdaemon true \
         --daemonuser root
 
     rm -rf "${TMP_DIR}"
 fi
 
-# ── Create systemd service unit if installer didn't ──────────────────────────
-# The Deadline Linux installer sometimes fails to create a systemd unit on
-# AL2023 (only creates SysV init scripts). Create it explicitly.
+# ── Install CA Certificate ───────────────────────────────────────────────────
+mkdir -p "${DEADLINE_VAR}/certs"
+# The build script expects ca.crt to be present in the ami/ directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "$SCRIPT_DIR/../ca.crt" ]]; then
+    cp "$SCRIPT_DIR/../ca.crt" "${DEADLINE_VAR}/certs/ca.crt"
+    chmod 644 "${DEADLINE_VAR}/certs/ca.crt"
+    echo "==> [05] Copied ca.crt to worker certs directory"
+else
+    echo "==> [05] WARNING: ca.crt not found at $SCRIPT_DIR/../ca.crt. SSL may fail."
+fi
+
+# ── Systemd override: ensure boot after ZeroTier and UBL ─────────────────────
 SERVICE_FILE="/etc/systemd/system/deadline10launcher.service"
 if [[ ! -f "$SERVICE_FILE" ]]; then
     cat > "$SERVICE_FILE" << 'UNIT'
 [Unit]
 Description=Deadline 10 Launcher
-After=houdini-ubl.service network-online.target
-Wants=network-online.target
+After=zerotier-auto-join.service houdini-ubl.service network-online.target
+Wants=zerotier-auto-join.service houdini-ubl.service network-online.target
 
 [Service]
 Type=simple
-ExecStart=/opt/Thinkbox/Deadline10/bin/deadlinelauncher
+ExecStart=/opt/Thinkbox/Deadline10/bin/deadlinelauncher -nogui
 Restart=on-failure
 RestartSec=10
 Environment=HOME=/root
+Environment=QT_QPA_PLATFORM=offscreen
 
 [Install]
 WantedBy=multi-user.target
 UNIT
     systemctl daemon-reload
     echo "==> [05] Created deadline10launcher.service systemd unit"
-else
-    echo "==> [05] deadline10launcher.service already exists"
 fi
 
-# ── Systemd override: ensure boot after UBL and network ──────────────────────
 OVERRIDE_DIR="/etc/systemd/system/deadline10launcher.service.d"
 OVERRIDE_FILE="${OVERRIDE_DIR}/override.conf"
-if [[ ! -f "$OVERRIDE_FILE" ]]; then
-    mkdir -p "$OVERRIDE_DIR"
-    cat > "$OVERRIDE_FILE" << 'UNIT'
+mkdir -p "$OVERRIDE_DIR"
+cat > "$OVERRIDE_FILE" << 'UNIT'
 [Unit]
-After=houdini-ubl.service network-online.target
-Wants=network-online.target
+After=zerotier-auto-join.service houdini-ubl.service network-online.target
+Wants=zerotier-auto-join.service houdini-ubl.service network-online.target
 UNIT
-    systemctl daemon-reload
-fi
+systemctl daemon-reload
 
-# ── Disable launcher service — Portal user-data starts it after config ───────
-# May fail if unit not yet loaded — non-fatal.
-systemctl disable deadline10launcher.service 2>/dev/null || true
-# Service stays disabled — Portal user-data enables and starts it at launch.
+# ── Enable launcher service ──────────────────────────────────────────────────
+systemctl enable deadline10launcher.service
 
-# ── Ensure deadline.ini has Portal-compatible defaults ───────────────────────
+# ── Ensure deadline.ini has correct Static IP settings ───────────────────────
 mkdir -p "${DEADLINE_VAR}"
 INI_FILE="${DEADLINE_VAR}/deadline.ini"
-if [[ ! -f "$INI_FILE" ]]; then
-    cat > "$INI_FILE" << INIEOF
+cat > "$INI_FILE" << 'INIEOF'
+[Deadline]
 ConnectionType=Remote
-ProxyRoot=
-LaunchSlaveAtStartup=false
+ProxyRoot=10.147.18.89:4433
+ProxyUseSSL=True
+ProxySSLCertificate=
+ProxySSLCA=
+ClientSSLAuthentication=NotRequired
+LaunchSlaveAtStartup=true
+NoGuiMode=true
 INIEOF
-else
-    # Patch existing file to ensure Portal-compatible values
-    sed -i 's/^ConnectionType=.*/ConnectionType=Remote/' "$INI_FILE" 2>/dev/null || true
-    sed -i 's/^ProxyRoot=.*/ProxyRoot=/' "$INI_FILE" 2>/dev/null || true
-    sed -i 's/^LaunchSlaveAtStartup=.*/LaunchSlaveAtStartup=false/' "$INI_FILE" 2>/dev/null || true
-fi
 
 # ── Ensure slaves directory exists and is writable ───────────────────────────
 mkdir -p "${DEADLINE_VAR}/slaves"
 chmod 777 "${DEADLINE_VAR}/slaves"
 
-# ── Ensure /home/ec2-user/.aws/ directory exists ────────────────────────────
-# Created by 01_system_prep.sh but ensure it exists in case of re-runs.
-mkdir -p /home/ec2-user/.aws
-chown -R ec2-user:ec2-user /home/ec2-user/.aws
-
-# ── CloudWatch shim scripts ──────────────────────────────────────────────────
-# Portal user-data may call these helpers. If the Deadline installer did not
-# create them, provide no-op shims so the boot sequence does not fail.
-
-CW_SETUP_BIN="/opt/Thinkbox/CloudWatchSetup/bin"
-CW_DIR="/opt/Thinkbox/CloudWatch"
-
-mkdir -p "$CW_SETUP_BIN" "$CW_DIR"
-
-# set_awslogs_region.py — no-op shim
-CW_REGION_SCRIPT="${CW_SETUP_BIN}/set_awslogs_region.py"
-if [[ ! -f "$CW_REGION_SCRIPT" ]]; then
-    cat > "$CW_REGION_SCRIPT" << 'PYEOF'
-#!/usr/bin/env python3
-"""No-op shim: Portal does not use CloudWatch agent configuration."""
-pass
-PYEOF
-    chmod +x "$CW_REGION_SCRIPT"
-fi
-
-# add_awslogs_stream_name_prefix.py — no-op shim
-CW_PREFIX_SCRIPT="${CW_SETUP_BIN}/add_awslogs_stream_name_prefix.py"
-if [[ ! -f "$CW_PREFIX_SCRIPT" ]]; then
-    cat > "$CW_PREFIX_SCRIPT" << 'PYEOF'
-#!/usr/bin/env python3
-"""No-op shim: Portal does not use CloudWatch agent configuration."""
-pass
-PYEOF
-    chmod +x "$CW_PREFIX_SCRIPT"
-fi
-
-# on_instance_init.sh — no-op shim
-CW_INIT_SCRIPT="${CW_DIR}/on_instance_init.sh"
-if [[ ! -f "$CW_INIT_SCRIPT" ]]; then
-    cat > "$CW_INIT_SCRIPT" << 'BASHEOF'
-#!/usr/bin/env bash
-# No-op shim: Portal does not use CloudWatch on-instance init.
-exit 0
-BASHEOF
-    chmod +x "$CW_INIT_SCRIPT"
-fi
-
-echo "==> [05] Deadline Worker ${DEADLINE_VERSION} installed (service disabled, Portal-ready)"
-echo "==> [05] Connection: Remote with empty ProxyRoot — Portal user-data configures at launch"
+echo "==> [05] Deadline Worker installed and configured for Spot Event Plugin (ZeroTier IP)"

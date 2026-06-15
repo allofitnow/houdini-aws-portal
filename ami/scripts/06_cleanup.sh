@@ -49,3 +49,7 @@ rm -f /etc/profile.d/houdini-license.sh
 cloud-init clean --logs 2>/dev/null || true
 
 echo "==> [06] Cleanup complete — instance is ready to image"
+
+# Clear ZeroTier identity so each worker gets a unique ID on boot
+systemctl stop zerotier-one || true
+rm -rf /var/lib/zerotier-one/identity.* || true
