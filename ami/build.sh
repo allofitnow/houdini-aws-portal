@@ -96,6 +96,7 @@ fi
 run_step 02_nvidia_drivers.sh
 run_step 03_zerotier.sh
 run_step 04_houdini.sh
+run_step 04b_rclone_b2.sh
 
 # Copy test scene to ec2-user home for validation renders
 INSTALL_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -108,6 +109,7 @@ else
 fi
 
 run_step 05_deadline_worker.sh
+run_step 06_auto_group.sh
 run_step 07_s3_output_sync.sh
 run_step 06_cleanup.sh
 

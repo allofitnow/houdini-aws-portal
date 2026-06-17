@@ -29,13 +29,16 @@ The studio runs an on-prem render farm of 10 nodes (RTX A6000, 128 GB RAM, 16 co
 Key design decisions:
 - **Linux workers** — Houdini-only scope (no Notch/AE) enables Linux, which reduces cost, eliminates Windows licensing, and is the target OS for Deadline's Houdini conda packages.
 - **ZeroTier overlay** — Workers join the existing render farm VPN instead of requiring a Site-to-Site VPN or RCS setup. MVP uses manual node authorisation; future work will automate it.
-- **Backblaze B2 for output** — Cheaper than S3 for render frame storage. Mounted as a POSIX filesystem via rclone so Houdini ROPs write to a plain path with no API integration.
+- **Backblaze B2 for input and output** — Cheaper than S3 for both scene storage and render frame storage. Mounted as a POSIX filesystem via rclone so workers read/write plain paths with no API integration.
 - **No credentials in the AMI** — B2 keys, UBL token, and AWS credentials are pulled from Secrets Manager at boot and never baked into the image.
+- **Capacity over location** — Instance allocation is region-agnostic within the limits of GPU spot availability. See [Instance Allocation](Instance-Allocation.md).
 
 ---
 
 ## Pages in this wiki
 
+- [Instance Allocation](Instance-Allocation.md) — How workers are allocated across regions, groups, and Spot Fleets
+- [B2 Render Workflow](B2-Render-Workflow.md) — Submit Houdini renders that read input from and write output to Backblaze B2
 - [Architecture](Architecture.md) — Stack diagram, networking, storage, boot sequence
 - [AMI Build](AMI-Build.md) — Step-by-step build guide and script conventions
 - [Credentials and Secrets](Credentials-and-Secrets.md) — Where secrets live and how they are injected

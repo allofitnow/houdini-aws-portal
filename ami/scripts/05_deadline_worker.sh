@@ -41,25 +41,31 @@ else
 fi
 
 # ── Install CA Certificate ───────────────────────────────────────────────────
+# Deadline launcher runs as root (HOME=/root) and reads certs from its own
+# config tree, not /var/lib. Install ca.crt in both locations.
 mkdir -p "${DEADLINE_VAR}/certs"
+DEADLINE_ROOT="/root/Thinkbox/Deadline10"
+mkdir -p "${DEADLINE_ROOT}/certs"
 # The build script expects ca.crt to be present in the ami/ directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "$SCRIPT_DIR/../ca.crt" ]]; then
     cp "$SCRIPT_DIR/../ca.crt" "${DEADLINE_VAR}/certs/ca.crt"
     chmod 644 "${DEADLINE_VAR}/certs/ca.crt"
-    echo "==> [05] Copied ca.crt to worker certs directory"
+    cp "$SCRIPT_DIR/../ca.crt" "${DEADLINE_ROOT}/certs/ca.crt"
+    chmod 644 "${DEADLINE_ROOT}/certs/ca.crt"
+    echo "==> [05] Copied ca.crt to worker certs directories"
 else
     echo "==> [05] WARNING: ca.crt not found at $SCRIPT_DIR/../ca.crt. SSL may fail."
 fi
 
-# ── Systemd override: ensure boot after ZeroTier and UBL ─────────────────────
+# ── Systemd override: ensure boot after ZeroTier, B2 and UBL ───────────────
 SERVICE_FILE="/etc/systemd/system/deadline10launcher.service"
 if [[ ! -f "$SERVICE_FILE" ]]; then
     cat > "$SERVICE_FILE" << 'UNIT'
 [Unit]
 Description=Deadline 10 Launcher
-After=zerotier-auto-join.service houdini-ubl.service network-online.target
-Wants=zerotier-auto-join.service houdini-ubl.service network-online.target
+After=zerotier-auto-join.service rclone-b2-renders.service houdini-ubl.service network-online.target
+Wants=zerotier-auto-join.service rclone-b2-renders.service houdini-ubl.service network-online.target
 
 [Service]
 Type=simple
@@ -81,30 +87,34 @@ OVERRIDE_FILE="${OVERRIDE_DIR}/override.conf"
 mkdir -p "$OVERRIDE_DIR"
 cat > "$OVERRIDE_FILE" << 'UNIT'
 [Unit]
-After=zerotier-auto-join.service houdini-ubl.service network-online.target
-Wants=zerotier-auto-join.service houdini-ubl.service network-online.target
+After=zerotier-auto-join.service rclone-b2-renders.service houdini-ubl.service network-online.target
+Wants=zerotier-auto-join.service rclone-b2-renders.service houdini-ubl.service network-online.target
 UNIT
 systemctl daemon-reload
 
 # ── Enable launcher service ──────────────────────────────────────────────────
 systemctl enable deadline10launcher.service
 
-# ── Ensure deadline.ini has correct Static IP settings ───────────────────────
-mkdir -p "${DEADLINE_VAR}"
-INI_FILE="${DEADLINE_VAR}/deadline.ini"
-cat > "$INI_FILE" << 'INIEOF'
-[Deadline]
+# ── Ensure deadline.ini has correct Static IP and SSL settings ──────────
+# The installer writes its own deadline.ini under /root/Thinkbox/Deadline10.
+# Launcher runs as root (HOME=/root) so that copy wins. We must configure
+# BOTH /var/lib and /root copies identically.
+DEADLINE_INI='[Deadline]
 ConnectionType=Remote
 ProxyRoot=10.147.18.89:4433
 ProxyUseSSL=True
-ProxySSLCertificate=
-ProxySSLCA=
-ClientSSLAuthentication=NotRequired
+ProxySSLCertificate=/root/Thinkbox/Deadline10/certs/Deadline10Client.pfx
+ProxySSLCA=/root/Thinkbox/Deadline10/certs/ca.crt
+ClientSSLAuthentication=Required
 LaunchSlaveAtStartup=true
-NoGuiMode=true
-INIEOF
+NoGuiMode=true'
 
-# ── Ensure slaves directory exists and is writable ───────────────────────────
+mkdir -p "${DEADLINE_VAR}"
+printf '%s\n' "$DEADLINE_INI" > "${DEADLINE_VAR}/deadline.ini"
+printf '%s\n' "$DEADLINE_INI" > "${DEADLINE_ROOT}/deadline.ini"
+echo "==> [05] Wrote deadline.ini to /var/lib and /root Thinkbox paths"
+
+# ── Ensure slaves directory exists and is writable ─────────────────────
 mkdir -p "${DEADLINE_VAR}/slaves"
 chmod 777 "${DEADLINE_VAR}/slaves"
 

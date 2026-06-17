@@ -90,7 +90,7 @@ ZT_NETWORK = os.environ['ZT_NETWORK']
 NODE_ID    = os.environ['NODE_ID']
 SKIP_NODES = set(os.environ.get('SKIP_NODES', '').split())
 
-API_BASE = f"https://api.zerotier.com/api/v1/network/{ZT_NETWORK}"
+API_BASE = f"https://my.zerotier.com/api/network/{ZT_NETWORK}"
 STALE_MS = 3_600_000  # 1 hour — only purge members unseen this long
 
 

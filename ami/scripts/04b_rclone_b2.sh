@@ -13,7 +13,7 @@
 # Set B2_BUCKET to your target bucket name before running.
 # Example: B2_BUCKET=renders-allofitnow
 
-B2_BUCKET="${B2_BUCKET:-CHANGE_ME}"
+B2_BUCKET="${B2_BUCKET:-aoin-test}"
 MOUNT_POINT="/mnt/renders"
 RCLONE_CONF="/etc/rclone/rclone.conf"
 AWS_REGION="${AWS_REGION:-us-west-2}"
@@ -28,7 +28,11 @@ echo "==>"
 curl -fsSL https://rclone.org/install.sh | bash
 
 # Install fuse3 (required for rclone mount)
-apt-get install -y fuse3
+if command -v apt-get &>/dev/null; then
+    apt-get install -y fuse3
+elif command -v dnf &>/dev/null; then
+    dnf install -y fuse3 fuse3-libs
+fi
 
 # Create mount point
 mkdir -p "$MOUNT_POINT"
@@ -80,8 +84,8 @@ BOOTSCRIPT
 
 chmod 700 /usr/local/sbin/rclone-b2-mount.sh
 
-# Install systemd unit
-cat > /etc/systemd/system/rclone-b2-renders.service << UNIT
+# ── Rclone B2 mount unit ─────────────────────────────────────────────────────
+cat > /etc/systemd/system/rclone-b2-renders.service << 'UNIT'
 [Unit]
 Description=Mount Backblaze B2 render output bucket at /mnt/renders
 After=network-online.target zerotier-one.service
@@ -98,8 +102,43 @@ TimeoutStartSec=60
 WantedBy=multi-user.target
 UNIT
 
+# ── Render symlink service ───────────────────────────────────────────────────
+# The test scene's Karma ROP writes to /tmp/renderkarma/<scene>.<rop>.####.exr.
+# Redirect that path to the B2 mount so rendered frames are persisted to
+# Backblaze without an upload step. The symlink is created at boot; individual
+# jobs can repoint it to a job-specific subfolder under /mnt/renders/outputs/.
+cat > /usr/local/sbin/render-symlink.sh << 'SYMLINK'
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p "$MOUNT_POINT"
+if [[ -d /tmp/renderkarma && ! -L /tmp/renderkarma ]]; then
+    rm -rf /tmp/renderkarma
+fi
+if [[ ! -e /tmp/renderkarma ]]; then
+    ln -s "$MOUNT_POINT" /tmp/renderkarma
+fi
+SYMLINK
+chmod 700 /usr/local/sbin/render-symlink.sh
+
+cat > /etc/systemd/system/render-symlink.service << 'UNIT'
+[Unit]
+Description=Render output symlink (/tmp/renderkarma -> /mnt/renders)
+After=rclone-b2-renders.service
+Before=deadline10launcher.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/render-symlink.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# Install systemd units
 systemctl daemon-reload
 systemctl enable rclone-b2-renders.service
+systemctl enable render-symlink.service
 
 echo "==> [04b] rclone B2 setup complete"
 echo "==> [04b] IMPORTANT: Set B2_BUCKET in this script before building AMI (current: ${B2_BUCKET})"
