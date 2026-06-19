@@ -40,7 +40,7 @@ echo "[auto-group] Hostname: $HOSTNAME"
 ZT_NETWORK="d3ecf5726d14ac76"
 ZT_IP=""
 for i in $(seq 1 30); do
-    ZT_IP=$(zerotier-cli listnetworks 2>/dev/null | awk '/OK/{print $9}' | sed 's|/.*||')
+    ZT_IP=$(/usr/sbin/zerotier-cli listnetworks 2>/dev/null | awk '/OK/{print $9}' | sed 's|/.*||')
     if [[ -n "$ZT_IP" ]]; then
         break
     fi
@@ -81,8 +81,8 @@ chmod 700 /usr/local/sbin/deadline-auto-group.sh
 cat > /etc/systemd/system/deadline-auto-group.service << 'UNIT'
 [Unit]
 Description=Auto-assign worker to Deadline Group based on AWS region
-After=deadline10launcher.service network-online.target
-Wants=deadline10launcher.service
+After=deadline10launcher.service zerotier-one.service network-online.target
+Wants=deadline10launcher.service zerotier-one.service
 
 [Service]
 Type=oneshot
