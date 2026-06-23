@@ -40,8 +40,8 @@ update-ca-trust
 # We wait for the managed IP here so we can set HostMachineIPAddressOverride.
 ZT_IP=""
 for i in $(seq 1 60); do
-    ZT_IP=$(zerotier-cli listnetworks 2>/dev/null | awk -v net="${ZT_NETWORK}" '$1==net||$3==net{print $NF}' | cut -d/ -f1)
-    if [[ -n "${ZT_IP}" ]]; then
+    ZT_IP=$(zerotier-cli listnetworks 2>/dev/null | awk -v net="${ZT_NETWORK}" '$3==net{print $9}' | cut -d/ -f1)
+    if [[ -n "${ZT_IP}" && "${ZT_IP}" != "-" ]]; then
         echo "ZeroTier IP acquired: ${ZT_IP}"
         break
     fi
@@ -54,9 +54,13 @@ if [[ -z "${ZT_IP}" ]]; then
     ZT_IP="0.0.0.0"
 fi
 
-# Set system hostname to ZT IP so Deadline RemoteLog can resolve the worker
-# without DNS (AWS private hostnames like ip-172-31-x-x are not routable on-prem).
-hostnamectl set-hostname "$ZT_IP"
+# Set system hostname to ZT IP (dashes, not dots — Deadline uses short hostname
+# which truncates at first dot). Add /etc/hosts entry so the worker can resolve
+# its own name. The RCS Windows hosts file must also have an entry (added manually
+# or via automation) for RemoteLog to resolve the worker from the on-prem network.
+ZT_DASHED=$(echo "$ZT_IP" | tr . -)
+hostnamectl set-hostname "$ZT_DASHED"
+grep -q "$ZT_DASHED" /etc/hosts || echo "$ZT_IP $ZT_DASHED" >> /etc/hosts
 
 # ─── 4. Write deadline.ini to BOTH locations ───
 DEADLINE_INI="[Deadline]
