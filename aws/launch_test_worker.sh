@@ -40,7 +40,7 @@ update-ca-trust
 # We wait for the managed IP here so we can set HostMachineIPAddressOverride.
 ZT_IP=""
 for i in $(seq 1 60); do
-    ZT_IP=$(zerotier-cli listnetworks 2>/dev/null | awk -v net="${ZT_NETWORK}" '$1==net{print $9}' | cut -d/ -f1)
+    ZT_IP=$(zerotier-cli listnetworks 2>/dev/null | awk -v net="${ZT_NETWORK}" '$1==net||$3==net{print $NF}' | cut -d/ -f1)
     if [[ -n "${ZT_IP}" ]]; then
         echo "ZeroTier IP acquired: ${ZT_IP}"
         break
@@ -53,6 +53,10 @@ if [[ -z "${ZT_IP}" ]]; then
     echo "WARNING: No ZeroTier IP after 5 min. RCS connectivity may fail."
     ZT_IP="0.0.0.0"
 fi
+
+# Set system hostname to ZT IP so Deadline RemoteLog can resolve the worker
+# without DNS (AWS private hostnames like ip-172-31-x-x are not routable on-prem).
+hostnamectl set-hostname "$ZT_IP"
 
 # ─── 4. Write deadline.ini to BOTH locations ───
 DEADLINE_INI="[Deadline]
