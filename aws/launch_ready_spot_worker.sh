@@ -503,7 +503,7 @@ authorize_zerotier_node() {
     exit 1
 }
 
-# Inject this machine's SSH public keys into the worker's ubuntu account.
+# Inject this machine's SSH public keys into the worker's ec2-user account.
 inject_ssh_keys() {
     local instance_id="$1"
     if [[ -z "${SSH_PUBLIC_KEYS:-}" ]]; then
@@ -511,18 +511,18 @@ inject_ssh_keys() {
         return 0
     fi
 
-    echo "Injecting SSH public keys into ubuntu@${instance_id}..."
+    echo "Injecting SSH public keys into ec2-user@${instance_id}..."
     # Escape for safe embedding in a shell heredoc inside jq
     local escaped_keys
     escaped_keys=$(printf '%s' "$SSH_PUBLIC_KEYS" | sed "s/'/'\\''/g")
 
     ssm_send_and_wait "$instance_id" \
-        "sudo mkdir -p /home/ubuntu/.ssh" \
-        "sudo chmod 700 /home/ubuntu/.ssh" \
-        "printf '%s\\n' '${escaped_keys}' | sudo tee -a /home/ubuntu/.ssh/authorized_keys > /dev/null" \
-        "sudo sort -u /home/ubuntu/.ssh/authorized_keys -o /home/ubuntu/.ssh/authorized_keys" \
-        "sudo chmod 600 /home/ubuntu/.ssh/authorized_keys" \
-        "sudo chown -R ubuntu:ubuntu /home/ubuntu/.ssh"
+        "sudo mkdir -p /home/ec2-user/.ssh" \
+        "sudo chmod 700 /home/ec2-user/.ssh" \
+        "printf '%s\\n' '${escaped_keys}' | sudo tee -a /home/ec2-user/.ssh/authorized_keys > /dev/null" \
+        "sudo sort -u /home/ec2-user/.ssh/authorized_keys -o /home/ec2-user/.ssh/authorized_keys" \
+        "sudo chmod 600 /home/ec2-user/.ssh/authorized_keys" \
+        "sudo chown -R ec2-user:ec2-user /home/ec2-user/.ssh"
     echo "SSH keys injected."
 }
 
@@ -640,7 +640,7 @@ else
     echo " AMI:          ${AMI_ID}"
     echo " Subnet:       ${SUBNET_ID_SELECTED}"
     echo " Security SG:  ${SG_ID_SELECTED}"
-    echo " SSH:          ssh ubuntu@<zerotier-ip-of-worker>"
+    echo " SSH:          ssh ec2-user@<zerotier-ip-of-worker>"
     echo " Deadline:     Worker should appear in Deadline Monitor"
     echo " Desktop:      Set INSTALL_DESKTOP=true to add GNOME+DCV"
     echo "========================================================"

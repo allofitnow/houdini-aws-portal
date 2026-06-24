@@ -11,8 +11,8 @@
 set -euo pipefail
 
 REGION="${REGION:-${AWS_REGION:-us-west-2}}"
-AMI_ID="${AMI_ID:-ami-0ababc7e5826abb79}"      # Ubuntu 22.04 LTS; override per region
-INSTANCE_TYPE="${INSTANCE_TYPE:-g6.xlarge}"
+AMI_ID="${AMI_ID:-ami-0ababc7e5826abb79}"      # Ubuntu 22.04 LTS for legacy build; override with AL2023 AMI for current stack
+INSTANCE_TYPE="${INSTANCE_TYPE:-g6e.4xlarge}"
 KEY_NAME="${KEY_NAME:-deadline-ami-build}"
 PROFILE="${PROFILE:-deadline-worker-profile}"
 SUBNET_ID="${SUBNET_ID:-}"
@@ -86,8 +86,8 @@ echo "  Public IP   : $PUBLIC_IP"
 echo ""
 echo "Next steps:"
 echo "  1. Copy build scripts to instance:"
-echo "     scp -i ~/.ssh/${KEY_NAME}.pem -r ../ami ubuntu@${PUBLIC_IP}:/tmp/"
+echo "     scp -i ~/.ssh/${KEY_NAME}.pem -r ../ami ec2-user@${PUBLIC_IP}:/tmp/"
 echo "  2. SSH in:"
-echo "     ssh -i ~/.ssh/${KEY_NAME}.pem ubuntu@${PUBLIC_IP}"
+echo "     ssh -i ~/.ssh/${KEY_NAME}.pem ec2-user@${PUBLIC_IP}"
 echo "  3. Run the build:"
 echo "     sudo bash /tmp/ami/build.sh --aws-region ${REGION} --repo-ip <ZT_IP> --s3-bucket <BUCKET> --houdini-build <BUILD> --b2-bucket <B2_BUCKET>"
