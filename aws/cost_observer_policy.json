@@ -1,0 +1,65 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "PricingAPI",
+      "Effect": "Allow",
+      "Action": ["pricing:GetProducts"],
+      "Resource": "*",
+      "Comment": "Pricing API is only available in us-east-1 and ap-south-1. Must call with --region us-east-1."
+    },
+    {
+      "Sid": "AthenaQueries",
+      "Effect": "Allow",
+      "Action": [
+        "athena:StartQueryExecution",
+        "athena:GetQueryExecution",
+        "athena:GetQueryResults",
+        "athena:ListWorkGroups"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "GlueDataCatalog",
+      "Effect": "Allow",
+      "Action": [
+        "glue:GetDatabase",
+        "glue:GetTable",
+        "glue:GetPartitions",
+        "glue:GetDatabases",
+        "glue:GetTables"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CURBucketRead",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetBucketLocation",
+        "s3:GetObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::cur-houdini-aws-portal-*",
+        "arn:aws:s3:::cur-houdini-aws-portal-*/*",
+        "arn:aws:s3:::athena-results-*",
+        "arn:aws:s3:::athena-results-*/*"
+      ]
+    },
+    {
+      "Sid": "AthenaResultsWrite",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject"],
+      "Resource": ["arn:aws:s3:::athena-results-*/*"]
+    },
+    {
+      "Sid": "EC2Metadata",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeInstances",
+        "ec2:DescribeSpotPriceHistory"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
