@@ -126,7 +126,7 @@ directory. The existing AWSPortal plugin confirms this:
 
 ### A. Deadline Event Plugin (`AwsJobCostObserver.py`)
 
-**Location:** `{REPO_ROOT}/events/AwsJobCostObserver/` — i.e., `/mnt/c/DeadlineRepository10/events/AwsJobCostObserver/`
+**Location:** `{REPO_ROOT}/custom/plugins/AwsJobCostObserver/` — i.e., `/mnt/c/DeadlineRepository10/custom/plugins/AwsJobCostObserver/`
 
 > Event plugins are installed under the **Repository** directory (confirmed by the
 > existing AWSPortal plugin at `{REPO_ROOT}/events/AWSPortal/`). This is NOT the
@@ -451,6 +451,21 @@ def OnJobFinished(self, job, startTime, endTime):
 > **Note:** The `try/except` wrapping the entire body ensures that ANY error (AWS API
 > failure, Deadline API change, malformed data) is caught, logged, and does NOT block
 > the event pipeline. The job still completes normally; only cost tracking is skipped.
+
+**Helper function contracts (called by `OnJobFinished` but not yet defined):**
+
+These functions live in `cost_helpers.py` and are imported by the main plugin:
+
+| Function | Input | Output | Description |
+|----------|-------|--------|-------------|
+| `build_hostname_map(hostnames, instance_ids, region)` | Set of worker hostnames, resolved instance IDs, AWS region | `dict[hostname → instance_id]` | Reverse-lookup map: for each hostname, finds its EC2 instance ID. Uses `describe-instances --filter private-dns-name` to build the mapping. |
+| `get_instance_info(instance_id, region, timeout, retries)` | Instance ID, region | `InstanceInfo(type, az, lifecycle, launch_time)` namedtuple | Wraps `ec2.describe-instances`. Extracts `InstanceType`, `Placement.AvailabilityZone`, `InstanceLifecycle` (or `"on-demand"` if absent), and `LaunchTime`. |
+| `compute_instance_cost(launch_time, end_time, price_hr)` | Instance launch time, job end time, price/hr | `float` | `(end_time - launch_time).hours × price_hr`. Total instance cost from boot to job end. |
+| `send_alert(job, cost)` | Deadline job object, computed cost | None | Sends notification via Deadline's `NotificationUtils` or configured webhook. Includes job name, ID, submitter, cost, and threshold. |
+| `get_avg_spot_price(type, az, start, end, region, timeout, retries)` | Instance type, AZ, time window, region | `(price: float, source: str)` | Wraps `describe-spot-price-history`. Returns average price and `"spot"`. Falls back to `get_on_demand_price()` if no history → returns `("on_demand_fallback")`. |
+| `get_on_demand_price(type, region, timeout, retries)` | Instance type, region | `(price: float, source: str)` | Wraps `pricing/GetProducts` API. Returns on-demand hourly rate and `"on_demand"`. |
+
+Each function internally uses `call_with_timeout()` and retries per the error handling rules.
 
 ### B. AWS job detection logic
 
@@ -879,16 +894,18 @@ separately by the Resource Tracker.
 ## File layout (to be implemented)
 
 ```
-{REPO_ROOT}/events/AwsJobCostObserver/        # i.e., /mnt/c/DeadlineRepository10/events/AwsJobCostObserver/
+{REPO_ROOT}/custom/plugins/AwsJobCostObserver/  # i.e., /mnt/c/DeadlineRepository10/custom/plugins/AwsJobCostObserver/
     AwsJobCostObserver.py      # Event plugin (OnJobFinished)
     eventplugine.config        # Plugin config (JSON)
     cost_utils.py              # Shared cost computation logic (multi-instance, spot+on-demand)
+    cost_helpers.py            # Helper functions: build_hostname_map, get_instance_info,
+                               #   compute_instance_cost, send_alert
     README.md                  # Install + config instructions
 
 {REPO_ROOT}/reports/                           # i.e., /mnt/c/DeadlineRepository10/reports/
     cost_observer.jsonl        # Append-only cost log (JSONL)
     job_cost_reports/          # Per-job CSV cost reports (this spec)
-    cost_reconcile.py          # Daily reconciliation cron (Phase 2)
+    cost_reconcile.py          # Daily reconciliation cron (Phase 2) — runs via Windows Task Scheduler
     cost_report.py             # Weekly report generator (Phase 3)
 ```
 
@@ -931,7 +948,7 @@ separately by the Resource Tracker.
 |---|----------|-----------------------|
 | 1 | Should cost data persist after jobs are deleted from Deadline? | Yes — JSONL log + CSVs are the permanent record |
 | 2 | How to handle multi-region jobs (us-west-2 + us-east-1 failover)? | Query spot price per-instance-region, not job-level |
-| 3 | Should artists see cost in Deadline Monitor, or admin-only? | Admin-only initially; artist visibility is Phase 2 |
+| 3 | Should artists see cost in Deadline Monitor, or admin-only? | Admin-only initially; artist visibility is Phase 3 (per-artist breakdown) |
 | 4 | CUR Athena query timeout — what if CUR data is delayed >48h? | Skip reconciliation, retry next day, alert after 72h |
 | 5 | If `pricing_source` is mixed (some spot, some on-demand) across instances in one job? | Per-instance: each instance uses its own lifecycle-appropriate price. `pricing_source` column stores the majority source; JSON stores per-instance detail. |
 | 6 | DeadSlave events — should cost be computed when a worker crashes mid-render? | Phase 1: no. The job's OnJobFinished will fire when the job itself finishes regardless of individual worker outcomes. |
