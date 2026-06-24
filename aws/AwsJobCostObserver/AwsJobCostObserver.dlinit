@@ -1,0 +1,46 @@
+# AwsJobCostObserver Event Plugin Configuration
+# This file tells Deadline how to configure the plugin.
+# It defines configurable parameters that appear in the Event Plugin settings.
+
+[State]
+Enabled=True
+
+[Settings]
+# AWS region for pricing and instance lookups
+AWS Region=string::us-west-2
+
+# Per-API-call timeout in seconds (max time for any single AWS request)
+API Timeout Seconds=integer::30
+
+# Maximum retry attempts for failed API calls
+Max Retries=integer::2
+
+# Cost threshold for alerts (USD). Jobs exceeding this trigger a webhook alert.
+Alert Threshold=float::100.0
+
+# Hermes webhook URL for cost alerts (reachable from RCS host)
+Webhook URL=string::http://192.168.90.104:8644/webhook
+
+# Webhook secret (from Hermes config)
+Webhook Secret=password::
+
+# Whether to skip non-AWS jobs silently (True) or log them (False)
+Skip Non AWS Jobs=boolean::True
+
+# CSV report directory
+Report Directory=string::C:\DeadlineRepository10\reports\job_cost_reports
+
+# Plugin version (read-only, informational)
+Version=string::1.0.0
+
+[EventListener]
+Events=OnJobFinished
+
+[Description]
+Computes AWS EC2 render costs for completed Deadline jobs.
+Detects AWS jobs via pool/group/ExtraInfo2000/hostname pattern.
+Queries AWS Pricing API for on-demand rates and Spot Price History for spot rates.
+Writes cost estimates to ExtraInfo1980 (JSON) and ExtraInfo1981 (human-readable).
+Logs to CSV (24-column) and JSONL for downstream reporting.
+Sends Hermes webhook alerts when cost exceeds threshold.
+Non-blocking: any failure logs error and exits cleanly.
