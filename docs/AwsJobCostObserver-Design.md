@@ -152,7 +152,10 @@ def OnJobFinished(job, startTime, endTime):
     # 8. Log to JSONL for reconciliation
     append_cost_log(job.ID, cost_json)
 
-    # 9. Alert if over threshold
+    # 9. Write per-job CSV report
+    write_job_cost_csv(job.ID, job.Name, cost_json)
+
+    # 10. Alert if over threshold
     if render_cost > float(config.CostAlertThreshold):
         send_alert(job, render_cost)
 ```
@@ -201,7 +204,9 @@ last 48h that have Phase 1 estimates but no Phase 2 actuals.
 5. Update Deadline ExtraInfo:
    - `ExtraInfo1982` = actual cost JSON (Phase 2)
    - `ExtraInfo1981` updated to show both estimate and actual
-6. Flag variance > 10% in the JSONL log and Deadline Monitor
+6. Update per-job CSV in `job_cost_reports/`: fill `actual_cost`, `variance_pct`,
+   change `phase` from `estimate` to `reconciled`
+7. Flag variance > 10% in the JSONL log and Deadline Monitor
 
 ### D. Deadline Monitor integration
 
@@ -225,6 +230,69 @@ Alerts are sent via Deadline's built-in notification system (email / Slack webho
 | Single job cost > `$CostAlertThreshold` (default $50) | Email job submitter + admin |
 | Daily aggregate AWS spend > $500 | Email admin (computed from JSONL log) |
 | Estimate vs actual variance > 10% | Log warning in reconciliation report |
+
+### F. Per-job CSV reports
+
+Every job that completes also writes an individual CSV cost report to a
+`job_cost_reports/` subfolder. This gives a permanent, portable, per-job cost
+record that can be opened in Excel, shared with producers, or ingested by
+downstream billing systems.
+
+**Location:** `/opt/Thinkbox/Deadline10/reports/job_cost_reports/`
+
+**Filename:** `<job_id>_<job_name_sanitized>_<YYYYMMDD-HHMMSS>.csv`
+
+Example: `65a3f1b2_portal_ami_test_render_20260624-143052.csv`
+
+**CSV schema (columns):**
+
+| Column | Type | Example | Description |
+|--------|------|---------|-------------|
+| `job_id` | string | `65a3f1b2` | Deadline job ID |
+| `job_name` | string | `Portal_AMI_Test_Render` | Job name from Deadline |
+| `status` | string | `Completed` | Final job status |
+| `plugin` | string | `Houdini` | Deadline plugin |
+| `pool` | string | `awsportal` | Deadline pool |
+| `is_portal` | bool | `true` | Whether this was a Portal-managed job |
+| `frames` | string | `1-240` | Frame range |
+| `render_start` | ISO 8601 | `2026-06-24T14:00:00Z` | Job render start (UTC) |
+| `render_end` | ISO 8601 | `2026-06-24T17:12:34Z` | Job render end (UTC) |
+| `render_hours` | float | `3.21` | Total render duration in hours |
+| `instance_ids` | string (semicolon-delimited) | `i-0abc123;i-0def456` | EC2 instances that rendered this job |
+| `instance_type` | string | `g6e.4xlarge` | EC2 instance type |
+| `az` | string | `us-west-2a` | Availability zone |
+| `phase` | string | `estimate` | `estimate` (Phase 1) or `actual` (Phase 2 after reconciliation) |
+| `avg_spot_price_hr` | float | `0.7234` | Average spot price during job window ($/hr) |
+| `render_cost` | float | `2.32` | Compute cost for the render duration ($) |
+| `instance_cost` | float | `2.89` | Total instance cost from launch to termination ($) |
+| `actual_cost` | float | `` | CUR 2.0 actual cost (empty until Phase 2 reconciliation) |
+| `variance_pct` | float | `` | `(actual - estimate) / actual × 100` (empty until Phase 2) |
+| `currency` | string | `USD` | Always USD |
+| `computed_at` | ISO 8601 | `2026-06-24T17:12:35Z` | When this report was generated |
+
+**Example CSV file:**
+
+```csv
+job_id,job_name,status,plugin,pool,is_portal,frames,render_start,render_end,render_hours,instance_ids,instance_type,az,phase,avg_spot_price_hr,render_cost,instance_cost,actual_cost,variance_pct,currency,computed_at
+65a3f1b2,Portal_AMI_Test_Render,Completed,Houdini,awsportal,true,1-240,2026-06-24T14:00:00Z,2026-06-24T17:12:34Z,3.21,i-0abc123;i-0def456,g6e.4xlarge,us-west-2a,estimate,0.7234,2.32,2.89,,,USD,2026-06-24T17:12:35Z
+```
+
+**Behavior:**
+
+- **Phase 1 (estimate):** Written immediately on job completion. `actual_cost` and
+  `variance_pct` columns are empty.
+- **Phase 2 (actual):** The reconciliation cron updates the same file in-place,
+  filling in `actual_cost`, `variance_pct`, and changing `phase` from `estimate`
+  to `reconciled`.
+- **Job name sanitization:** Job names are stripped of filesystem-unsafe characters
+  (`/ \ : * ? " < > |`) and truncated to 50 chars to form the filename.
+- **Deduplication:** The `<job_id>` prefix in the filename guarantees uniqueness.
+  If a CSV already exists for a job_id, the Phase 2 update overwrites it rather
+  than creating a duplicate.
+- **Permissions:** Files are owned by the Deadline service account (`ec2-user`)
+  with mode `644` so they can be read by any user for reporting.
+- **Retention:** CSV files are never auto-deleted. The `cost_report.py` weekly
+  generator (Phase 3) reads all CSVs in this folder for aggregate reporting.
 
 ---
 
@@ -305,6 +373,7 @@ separately by the Resource Tracker.
 - OnJobFinished → compute Phase 1 spot estimate
 - Write to ExtraInfo1980/1981
 - Log to JSONL
+- Write per-job CSV to `job_cost_reports/`
 - Basic cost threshold alert
 - **Deliverable:** Plugin file + config + install instructions
 
@@ -312,11 +381,12 @@ separately by the Resource Tracker.
 - Implement `cost_reconcile.py` daily cron
 - Athena query per job for actuals
 - Update ExtraInfo1982 with Phase 2 actuals
+- Update CSV files in `job_cost_reports/` with actual_cost + variance_pct
 - Variance flagging
 - **Deliverable:** Cron script + Athena setup runbook
 
 ### Phase 3 — Dashboard (optional)
-- Generate weekly cost report from JSONL log
+- Generate weekly cost report from CSV files in `job_cost_reports/`
 - Per-show / per-artist cost breakdown
 - Trend analysis (cost per frame over time)
 - Export to CSV / spreadsheet
@@ -335,6 +405,7 @@ deadline/events/AwsJobCostObserver/
 
 deadline/reports/
     cost_observer.jsonl        # Append-only cost log (JSONL)
+    job_cost_reports/          # Per-job CSV cost reports (this spec)
     cost_reconcile.py          # Daily reconciliation cron
     cost_report.py             # Weekly report generator (Phase 3)
 ```
@@ -346,6 +417,8 @@ deadline/reports/
 - [ ] Submit a render job to an AWS pool → job completes → `ExtraInfo1980` populated
 - [ ] `ExtraInfo1981` shows human-readable cost summary in Deadline Monitor
 - [ ] JSONL log entry written with correct instance IDs and timing
+- [ ] **Per-job CSV written to `job_cost_reports/<job_id>_<name>_<timestamp>.csv`**
+- [ ] **CSV contains all 21 columns with correct values (spot price, render hours, costs)**
 - [ ] Cost within ±10% of `compute_job_cost.sh` for the same job
-- [ ] Non-AWS jobs (pool `none`) are skipped — no cost computed
+- [ ] Non-AWS jobs (pool `none`) are skipped — no cost computed, no CSV written
 - [ ] Cost threshold alert fires when job exceeds `$CostAlertThreshold`
