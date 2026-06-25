@@ -50,7 +50,7 @@ SOURCE_AMI_REGION="${SOURCE_AMI_REGION:-us-west-2}"
 SOURCE_AMI_ID="${SOURCE_AMI_ID:-ami-0f70342f66dc80ddb}"
 INSTANCE_TYPE="${INSTANCE_TYPE:-g5.xlarge}"
 PROFILE="${PROFILE:-deadline-worker-profile}"
-MARKET_OPTIONS='{"MarketType":"spot","SpotOptions":{"SpotInstanceType":"one-time"}}'
+MARKET_OPTIONS="${MARKET_OPTIONS:-'{\"MarketType\":\"spot\",\"SpotOptions\":{\"SpotInstanceType\":\"one-time\"}}'}"
 # Comma-separated list of regions that already have Portal networking and a
 # regional Deadline Cloud license endpoint secret. Keep the default conservative.
 READY_WORKER_REGIONS="${READY_WORKER_REGIONS:-${REGION:-us-west-2}}"
@@ -158,6 +158,92 @@ region_has_license_endpoint_secret() {
         return 1
     fi
 
+    # Validate the actual UBL endpoint health via aws deadline API.
+    # The secret contains a VPCE DNS name; resolve it to a license-endpoint ID
+    # and verify the endpoint is READY with metered products attached.
+    if [[ "$REQUIRE_LICENSE_ENDPOINT_SECRET" == "true" ]]; then
+        validate_ubl_endpoint "$region" "$secret_value" || return 1
+    fi
+
+    return 0
+}
+
+# Validate that the Deadline Cloud UBL endpoint backing the secret is READY
+# and has metered products. Returns 0 (healthy) or 1 (not usable).
+validate_ubl_endpoint() {
+    local region="$1"
+    local endpoint_dns="$2"
+    local endpoints_json endpoint_ids endpoint_id endpoint_status ep_dns products
+
+    # List all license endpoints — note: list-license-endpoints does NOT
+    # include dnsName, so we must call get-license-endpoint per endpoint.
+    endpoints_json=$(aws deadline list-license-endpoints \
+        --region "$region" \
+        --output json 2>/dev/null) || {
+        echo "  WARNING: aws deadline list-license-endpoints failed in ${region}." >&2
+        return 1
+    }
+
+    endpoint_ids=$(echo "$endpoints_json" \
+        | jq -r '.licenseEndpoints[].licenseEndpointId' 2>/dev/null)
+
+    if [[ -z "$endpoint_ids" ]]; then
+        echo "  WARNING: No Deadline Cloud license endpoints in ${region}." >&2
+        return 1
+    fi
+
+    # Find the endpoint whose dnsName matches the secret value
+    local found=0
+    while IFS= read -r endpoint_id; do
+        [[ -z "$endpoint_id" ]] && continue
+        ep_dns=$(aws deadline get-license-endpoint \
+            --region "$region" \
+            --license-endpoint-id "$endpoint_id" \
+            --query 'dnsName' \
+            --output text 2>/dev/null) || continue
+
+        if [[ "$ep_dns" == "$endpoint_dns" ]]; then
+            found=1
+            break
+        fi
+    done <<< "$endpoint_ids"
+
+    if [[ "$found" -eq 0 ]]; then
+        echo "  WARNING: No license endpoint matching DNS '${endpoint_dns}' in ${region}." >&2
+        return 1
+    fi
+
+    # Verify endpoint status is READY
+    endpoint_status=$(aws deadline get-license-endpoint \
+        --region "$region" \
+        --license-endpoint-id "$endpoint_id" \
+        --query 'status' \
+        --output text 2>/dev/null) || {
+        echo "  WARNING: get-license-endpoint failed for ${endpoint_id}." >&2
+        return 1
+    }
+
+    if [[ "$endpoint_status" != "READY" ]]; then
+        echo "  WARNING: UBL endpoint ${endpoint_id} status is '${endpoint_status}', not READY." >&2
+        return 1
+    fi
+
+    # Verify metered products are attached
+    products=$(aws deadline list-metered-products \
+        --region "$region" \
+        --license-endpoint-id "$endpoint_id" \
+        --query 'meteredProducts[].productId' \
+        --output text 2>/dev/null) || {
+        echo "  WARNING: list-metered-products failed for ${endpoint_id}." >&2
+        return 1
+    }
+
+    if [[ -z "$products" ]]; then
+        echo "  WARNING: UBL endpoint ${endpoint_id} has no metered products attached." >&2
+        return 1
+    fi
+
+    echo "  UBL endpoint healthy: ${endpoint_id} (READY, products: ${products//$'\n'/, })"
     return 0
 }
 
@@ -354,6 +440,14 @@ launch_instance_with_fallback() {
             name="deadline-worker-$(date +%s)"
             err_file=$(mktemp)
             output_file=$(mktemp)
+
+            # Build market options array — only pass --instance-market-options for spot.
+            # For on-demand, omit it entirely (AWS rejects MarketType=on-demand).
+            market_args=()
+            if [[ "$MARKET_OPTIONS" == *'"MarketType":"spot"'* ]]; then
+                market_args+=(--instance-market-options "$MARKET_OPTIONS")
+            fi
+
             if aws ec2 run-instances \
                 --region "$candidate" \
                 --image-id "$ami" \
@@ -361,7 +455,7 @@ launch_instance_with_fallback() {
                 --iam-instance-profile Name="$PROFILE" \
                 --subnet-id "$subnet" \
                 --security-group-ids "$sg" \
-                --instance-market-options "$MARKET_OPTIONS" \
+                "${market_args[@]}" \
                 --tag-specifications "ResourceType=instance,Tags=[{Key=project,Value=deadline-worker},{Key=Name,Value=${name}}]" \
                 --query "Instances[0].InstanceId" \
                 --output text >"$output_file" 2>"$err_file"; then
