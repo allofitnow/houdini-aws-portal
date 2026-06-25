@@ -1,0 +1,63 @@
+[State]
+Type=Enum
+Items=Global Enabled;Disabled
+Category=Options
+CategoryOrder=0
+Index=0
+Label=State
+Default=Global Enabled
+Description=<html><head/><body><p>Controls whether this event plugin is active. Set to <b>Global Enabled</b> to process job-finished events for all jobs. Set to <b>Disabled</b> to turn off cost tracking.</p></body></html>
+
+[Region]
+Type=string
+Category=Options
+CategoryOrder=0
+Index=1
+Label=AWS Region
+Default=us-west-2
+Description=<html><head/><body><p>The AWS region used for EC2 instance queries and pricing API calls.</p></body></html>
+
+[APITimeout]
+Type=integer
+Category=Options
+CategoryOrder=0
+Index=2
+Label=API Timeout (seconds)
+Default=30
+Description=<html><head/><body><p>Maximum seconds to wait for any single AWS API call. Plugin is non-blocking: if this timeout is exceeded the cost is recorded as zero and the error is logged.</p></body></html>
+
+[MaxRetries]
+Type=integer
+Category=Options
+CategoryOrder=0
+Index=3
+Label=Max API Retries
+Default=2
+Description=<html><head/><body><p>Number of retry attempts after the initial API call fails. Uses exponential backoff (base delay 2s).</p></body></html>
+
+[AlertThreshold]
+Type=string
+Category=Options
+CategoryOrder=0
+Index=4
+Label=Cost Alert Threshold ($)
+Default=100.0
+Description=<html><head/><body><p>If a job's estimated render cost exceeds this amount, an alert is sent via the webhook URL below.</p></body></html>
+
+[DeadlineCommandPath]
+Type=string
+Category=Options
+CategoryOrder=0
+Index=5
+Label=Deadline Command Path
+Default=C:\Program Files\Thinkbox\Deadline10\bin\deadlinecommand.exe
+Description=<html><head/><body><p>Full path to deadlinecommand.exe on the RCS host. Used to set ExtraInfo fields on completed jobs.</p></body></html>
+
+[WebhookURL]
+Type=string
+Category=Options
+CategoryOrder=0
+Index=6
+Label=Hermes Webhook URL
+Default=http://192.168.90.104:8644/webhook
+Description=<html><head/><body><p>Hermes gateway webhook endpoint for cost threshold alerts. Leave as default if Hermes is running.</p></body></html>
