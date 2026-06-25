@@ -647,9 +647,33 @@ configure_houdini_ubl_runtime() {
 
 configure_deadline() {
     local instance_id="$1"
+    local worker_zt_ip
 
     echo "Installing Deadline RCS certificates and configuring Deadline client..."
     stage_certs_to_s3
+
+    # Wait for the worker's ZeroTier IP (needed for hostname + IP override)
+    echo "Waiting for worker ZeroTier IP..."
+    for _ in {1..12}; do
+        worker_zt_ip=$(ssm_send_and_wait "$instance_id" \
+            '/usr/sbin/zerotier-cli listnetworks 2>/dev/null | awk "/^\<OK\>/{print \$9}" | sed "s|/.*||"' \
+            'true' || true)
+        worker_zt_ip=$(echo "$worker_zt_ip" | grep -oE '10\.147\.[0-9]+\.[0-9]+' | head -1)
+        if [[ -n "$worker_zt_ip" ]]; then
+            break
+        fi
+        sleep 10
+    done
+
+    if [[ -z "$worker_zt_ip" ]]; then
+        echo "WARNING: Could not determine worker ZT IP. Using hostname as-is." >&2
+        worker_zt_ip="0.0.0.0"
+    fi
+    echo "Worker ZeroTier IP: ${worker_zt_ip}"
+
+    # Convert ZT IP to dashed hostname (Deadline truncates at first dot)
+    local worker_zt_dashed
+    worker_zt_dashed=$(echo "$worker_zt_ip" | tr . -)
 
     ssm_send_and_wait "$instance_id" \
         "sudo mkdir -p /var/lib/Thinkbox/Deadline10/certs" \
@@ -666,9 +690,13 @@ configure_deadline() {
         "sudo sed -i 's|^ProxyUseSSL=.*|ProxyUseSSL=True|' /var/lib/Thinkbox/Deadline10/deadline.ini" \
         "sudo sed -i 's|^ClientSSLAuthentication=.*|ClientSSLAuthentication=Required|' /var/lib/Thinkbox/Deadline10/deadline.ini" \
         "sudo rm -f /root/Thinkbox/Deadline10/deadline.ini" \
-        "sudo systemctl restart deadline10launcher"
+        "sudo systemctl stop deadline10launcher" \
+        "sudo hostnamectl set-hostname ${worker_zt_dashed}" \
+        "grep -q '${worker_zt_dashed}' /etc/hosts || echo '${worker_zt_ip} ${worker_zt_dashed}' | sudo tee -a /etc/hosts" \
+        "grep -q 'HostMachineIPAddressOverride' /var/lib/Thinkbox/Deadline10/deadline.ini && sudo sed -i 's|^HostMachineIPAddressOverride=.*|HostMachineIPAddressOverride=${worker_zt_ip}|' /var/lib/Thinkbox/Deadline10/deadline.ini || echo 'HostMachineIPAddressOverride=${worker_zt_ip}' | sudo tee -a /var/lib/Thinkbox/Deadline10/deadline.ini" \
+        "sudo systemctl start deadline10launcher"
 
-    echo "Deadline configured."
+    echo "Deadline configured. Worker hostname: ${worker_zt_dashed} (${worker_zt_ip})"
 }
 
 verify_deadline() {
