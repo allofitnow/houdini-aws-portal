@@ -5,3 +5,4 @@
 *.pfx
 .serena/
 .hermes/
+__pycache__/

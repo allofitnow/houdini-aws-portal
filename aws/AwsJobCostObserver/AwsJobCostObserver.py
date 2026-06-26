@@ -58,6 +58,8 @@ AWS_GROUPS = frozenset({
 _EC2_HOSTNAME_RE = re.compile(r"^ip-\d{1,3}-\d{1,3}-\d{1,3}-\d{1,3}$")
 # Direct instance ID pattern
 _INSTANCE_ID_RE = re.compile(r"^i-[a-f0-9]+$")
+# ZeroTier hostname pattern (dashed IP like 10-147-18-234)
+_ZT_HOSTNAME_RE = re.compile(r"^10-\d{1,3}-\d{1,3}-\d{1,3}$")
 
 
 def is_aws_job(pool, group, extra_info_2000, worker_hostnames):
@@ -88,11 +90,11 @@ def is_aws_job(pool, group, extra_info_2000, worker_hostnames):
     if group and group in AWS_GROUPS:
         return True, "group", "Group '%s' is a known AWS group" % group
 
-    # Method 3: ExtraInfo2000 contains "Portal"
-    if ei2000 and "portal" in ei2000.lower():
-        return True, "extrainfo", "ExtraInfo2000 contains Portal flag: '%s'" % ei2000
+    # Method 3: ExtraInfo2000 contains "Portal" or "aws"
+    if ei2000 and ("portal" in ei2000.lower() or "aws" in ei2000.lower()):
+        return True, "extrainfo", "ExtraInfo2000 contains AWS/Portal flag: '%s'" % ei2000
 
-    # Method 4: Worker hostname matches EC2 private DNS pattern
+    # Method 4: Worker hostname matches EC2 or ZeroTier pattern
     if worker_hostnames:
         for hn in worker_hostnames:
             hn_stripped = (hn or "").strip()
@@ -100,6 +102,8 @@ def is_aws_job(pool, group, extra_info_2000, worker_hostnames):
                 return True, "hostname", "Worker hostname '%s' matches EC2 DNS pattern" % hn_stripped
             if _INSTANCE_ID_RE.match(hn_stripped):
                 return True, "instance_id", "Worker hostname '%s' is an EC2 instance ID" % hn_stripped
+            if _ZT_HOSTNAME_RE.match(hn_stripped):
+                return True, "hostname", "Worker hostname '%s' matches ZeroTier pattern" % hn_stripped
 
     return False, "none", "No AWS indicators found"
 
@@ -115,7 +119,8 @@ def get_aws_workers(worker_hostnames):
     for hn in (worker_hostnames or []):
         hn_stripped = (hn or "").strip()
         is_ec2 = bool(_EC2_HOSTNAME_RE.match(hn_stripped) or
-                      _INSTANCE_ID_RE.match(hn_stripped))
+                      _INSTANCE_ID_RE.match(hn_stripped) or
+                      _ZT_HOSTNAME_RE.match(hn_stripped))
         result.append((hn_stripped, is_ec2))
     return result
 
@@ -709,6 +714,36 @@ from datetime import datetime, timezone
 # -- Output paths --------------------------------------------------------------
 
 DEFAULT_REPORT_DIR = r"C:\DeadlineRepository10\reports\job_cost_reports"
+
+
+def _get_report_dir():
+    """Get the report directory, auto-detecting platform and repository setup."""
+    import os
+    # On Windows (RCS/Pulse), use the repository path directly
+    if os.name == "nt":
+        # Try to get the repository root from Deadline
+        try:
+            repo_root = RepositoryUtils.GetRootDirectory()
+            if repo_root and os.path.isdir(str(repo_root)):
+                return os.path.join(str(repo_root), "reports", "job_cost_reports")
+        except Exception:
+            pass
+        return DEFAULT_REPORT_DIR
+    else:
+        # On Linux workers, write to a local path that can be collected later
+        # Try several known Deadline worker paths
+        for candidate in [
+            "/var/lib/Thinkbox/Deadline10/reports/job_cost_reports",
+            "/opt/Thinkbox/Deadline10/reports/job_cost_reports",
+            "/tmp/deadline_cost_reports",
+        ]:
+            try:
+                os.makedirs(candidate, exist_ok=True)
+                if os.access(candidate, os.W_OK):
+                    return candidate
+            except Exception:
+                continue
+        return "/tmp/deadline_cost_reports"
 CSV_FILENAME = "cost_log.csv"
 JSONL_FILENAME = "cost_observer.jsonl"
 
@@ -751,7 +786,7 @@ CSV_COLUMNS = [
 
 def ensure_report_dir(report_dir=None):
     """Create report directory if it doesn't exist."""
-    path = report_dir or DEFAULT_REPORT_DIR
+    path = report_dir or _get_report_dir()
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -942,7 +977,7 @@ class AwsJobCostObserverEventListener(DeadlineEventListener):
         self.LogInfo("Processing job %s ('%s') by user '%s'" % (job_id, job_name, username))
 
         # -- Step 1: Detect AWS job ----------------------------------------
-        worker_hostnames = self._get_worker_hostnames(job_id)
+        worker_hostnames = self._get_worker_hostnames(job_id, job)
 
         aws_detected, method, reason = is_aws_job(
             pool, group, extra_info_2000, worker_hostnames
@@ -1074,38 +1109,100 @@ class AwsJobCostObserverEventListener(DeadlineEventListener):
 
     # -- Deadline API helpers ----------------------------------------------
 
-    def _get_worker_hostnames(self, job_id):
-        """Get list of worker hostnames that rendered this job."""
+    def _get_worker_hostnames(self, job_id, job=None):
+        """Get list of worker hostnames that rendered this job.
+
+        Tries multiple methods since API availability varies by Deadline version.
+        """
+        hostnames = []
+
+        # Method 1: socket.gethostname() — most reliable since the event plugin
+        # runs ON the worker itself
+        try:
+            import socket
+            hn = socket.gethostname()
+            if hn and hn not in hostnames:
+                hostnames.append(hn)
+        except Exception:
+            pass
+
+        # Method 2: Try GetJobReports with iteration compatibility
         try:
             job_reports = RepositoryUtils.GetJobReports(job_id)
-            hostnames = []
-            for report in job_reports:
-                hn = report.SlaveName if hasattr(report, "SlaveName") else str(report)
-                if hn and hn not in hostnames:
-                    hostnames.append(hn)
-            return hostnames
+            # JobReportCollection may not be directly iterable - try various approaches
+            if hasattr(job_reports, "__iter__"):
+                for report in job_reports:
+                    hn = getattr(report, "SlaveName", None) or str(report)
+                    if hn and hn not in hostnames:
+                        hostnames.append(hn)
+            elif hasattr(job_reports, "Items"):
+                for report in job_reports.Items:
+                    hn = getattr(report, "SlaveName", None) or str(report)
+                    if hn and hn not in hostnames:
+                        hostnames.append(hn)
         except Exception as e:
             self.LogWarning("GetJobReports failed: %s" % str(e))
-            return []
+
+        # Method 3: Try ClientUtils.GetLocalSlaveName() (works in worker context)
+        if not hostnames:
+            try:
+                from Deadline.Scripting import ClientUtils
+                hn = ClientUtils.GetLocalSlaveName()
+                if hn and hn not in hostnames:
+                    hostnames.append(hn)
+            except Exception:
+                pass
+
+        return hostnames
 
     def _get_task_reports(self, job_id):
-        """Get task-level reports with StartTime/EndTime per worker."""
+        """Get task-level reports with StartTime/EndTime per worker.
+
+        Tries multiple API signatures since Deadline versions differ.
+        """
+        tasks = None
+        errors = []
+
+        # Signature 1: GetJobTasks(jobId) — no second arg
         try:
-            tasks = RepositoryUtils.GetJobTasks(job_id, True)
+            tasks = RepositoryUtils.GetJobTasks(job_id)
+        except Exception as e:
+            errors.append(str(e))
+
+        # Signature 2: GetJobTasks(jobId, True) — with includeReports flag
+        if tasks is None:
+            try:
+                tasks = RepositoryUtils.GetJobTasks(job_id, True)
+            except Exception as e:
+                errors.append(str(e))
+
+        # Signature 3: GetJobReports(jobId) — try to extract task info from reports
+        if tasks is None:
+            try:
+                reports_obj = RepositoryUtils.GetJobReports(job_id)
+                tasks = reports_obj.Items if hasattr(reports_obj, "Items") else reports_obj
+            except Exception as e:
+                errors.append(str(e))
+
+        if tasks is None:
+            self.LogWarning("GetJobTasks failed (all signatures): %s" % "; ".join(errors[:2]))
+            return []
+
+        try:
             reports = []
             for task in tasks:
                 reports.append(
                     {
-                        "SlaveName": task.SlaveName if hasattr(task, "SlaveName") else "",
-                        "TaskName": task.TaskName if hasattr(task, "TaskName") else "",
-                        "StartTime": task.StartTime if hasattr(task, "StartTime") else None,
-                        "EndTime": task.EndTime if hasattr(task, "EndTime") else None,
-                        "Seconds": task.RenderTime if hasattr(task, "RenderTime") else 0,
+                        "SlaveName": getattr(task, "SlaveName", "") or getattr(task, "ReportSlave", "") or "",
+                        "TaskName": getattr(task, "TaskName", ""),
+                        "StartTime": getattr(task, "StartTime", None),
+                        "EndTime": getattr(task, "EndTime", None),
+                        "Seconds": getattr(task, "RenderTime", 0) or getattr(task, "Seconds", 0) or 0,
                     }
                 )
             return reports
         except Exception as e:
-            self.LogWarning("GetJobTasks failed: %s" % str(e))
+            self.LogWarning("Task report extraction failed: %s" % str(e))
             return []
 
     def _set_extrainfo(self, job_id, index, value):
